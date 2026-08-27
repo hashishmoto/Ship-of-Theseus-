@@ -1,1056 +1,155 @@
+//  ░░      ░░░  ░░░░  ░░        ░░       ░░░░      ░░░        ░░        ░░  ░░░░  ░░        ░░░      ░░░        ░░  ░░░░  ░░░      ░░
+//  ▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒▒▒▒
+//  ▓▓      ▓▓▓        ▓▓▓▓▓  ▓▓▓▓▓       ▓▓▓  ▓▓▓▓  ▓▓      ▓▓▓▓▓▓▓  ▓▓▓▓▓        ▓▓      ▓▓▓▓▓      ▓▓▓      ▓▓▓▓  ▓▓▓▓  ▓▓▓      ▓▓
+//  ███████  ██  ████  █████  █████  ████████  ████  ██  ███████████  █████  ████  ██  ██████████████  ██  ████████  ████  ████████  █
+//  ██      ███  ████  ██        ██  █████████      ███  ███████████  █████  ████  ██        ███      ███        ███      ████      ██
+                                                                                                                                  
+
+
+
 setcpm(128/4)
-
-
-// ============================================================
-//                       Ship of Theseus  α
-// ============================================================
-
-const HARMONY_SEED = 1
-const RHYTHM_SEED = 2
-
-
-// ============================================================
-// MIDI
-// ============================================================
-
+const HARMONY_SEED = 312
+const RHYTHM_SEED = 40121
+const Weed = 666
 const midi = 'IAC Driver Bus 1'
-
 const drumChan  = 1
 const bassChan  = 2
 const stabChan  = 3
 const motifChan = 4
 
 
-const drum = p =>
-  p.midichan(drumChan).midi(midi)
 
-const bass = p =>
-  p.midichan(bassChan).midi(midi)
-
-const stab = p =>
-  p.midichan(stabChan).midi(midi)
-
-const motif = p =>
-  p.midichan(motifChan).midi(midi)
+const CFG = {
+  arcMode: 'det',         // 'det' = steady rise, 'rng' = probabilistic, 'out' = build to peak then fade
+  sections: 8,           // number of sections
+  energyMax: 3,           // top energy level
+  startEnergy: 0,
+  endEnergy: 0,
+  peakAt: 0.65,           // fraction where energy peaks (0-1)
+  peakEnergy: null,       // null = use energyMax
+  jitter: 0.2,            // wobble around curve (0-0.6)
+  driftUpChance: 0.85,    // (rng mode only)
+  moveChance: 0.75,       // (rng mode only)
+  minHold: 1,             // (rng mode only)
+  breakdownAt: 0.6,       // (rng mode only)
+  
+  chances: {
+    perc: 0.8,
+    open: 0.3,
+    motif: 0.7,
+    stabLow: 0.1,
+    stabHigh: 0.9,
+    fxLow: 0.7,
+    fxHigh: 0.2
+  }
+}
 
 
 // ============================================================
-// SEEDED RNG
+// RNG ENGINE
 // ============================================================
-
 function makeRng(seed) {
+  let s = seed % 2147483647 || 2147483646
+  return () => (s = (s * 16807) % 2147483647) / 2147483647
+}
+const pick = (arr, rng) => arr[Math.floor(rng() * arr.length)]
+const chance = (p, rng) => rng() < p
 
-  let s = seed % 2147483647
+const harmonyRng = makeRng(HARMONY_SEED), kickRng = makeRng(RHYTHM_SEED + 101)
+const bassRng = makeRng(RHYTHM_SEED + 202), hatRng = makeRng(RHYTHM_SEED + 303)
+const clapRng = makeRng(RHYTHM_SEED + 404), percRng = makeRng(RHYTHM_SEED + 505)
+const stabRng = makeRng(RHYTHM_SEED + 606), motifRng = makeRng(RHYTHM_SEED + 707)
+const arcRng = makeRng(Weed)
 
-  if (s <= 0)
-    s += 2147483646
+const tripletAmount = hatRng()
 
-  return () => {
-
-    s = s * 16807 % 2147483647
-
-    return s / 2147483647
-
-  }
-
+// ============================================================
+// ENERGY ARC GENERATION
+// ============================================================
+function targetEnergyAt(i, lastIndex) {
+  const peak = CFG.peakEnergy ?? CFG.energyMax
+  const peakIndex = CFG.peakAt * lastIndex
+  if (i <= peakIndex) return CFG.startEnergy + (peakIndex === 0 ? 1 : i / peakIndex) * (peak - CFG.startEnergy)
+  const remaining = lastIndex - peakIndex
+  return peak + (remaining === 0 ? 1 : (i - peakIndex) / remaining) * (CFG.endEnergy - peak)
 }
 
-
-function pick(arr, rng) {
-
-  return arr[
-    Math.floor(rng() * arr.length)
-  ]
-
+function generateArc() {
+  const lastIndex = CFG.sections - 1
+  return Array.from({ length: CFG.sections }, (_, i) => {
+    const target = targetEnergyAt(i, lastIndex)
+    const wobble = (arcRng() * 2 - 1) * CFG.jitter * CFG.energyMax
+    return Math.round(Math.max(0, Math.min(CFG.energyMax, target + wobble)))
+  })
 }
 
-
-function chance(probability, rng) {
-
-  return rng() < probability
-
-}
-
-
 // ============================================================
-// INDEPENDENT RNG STREAMS
+// HARMONY & PROGRESSIONS
 // ============================================================
-
-const harmonyRng =
-  makeRng(HARMONY_SEED)
-
-const kickRng =
-  makeRng(RHYTHM_SEED + 101)
-
-const bassRng =
-  makeRng(RHYTHM_SEED + 202)
-
-const hatRng =
-  makeRng(RHYTHM_SEED + 303)
-
-const clapRng =
-  makeRng(RHYTHM_SEED + 404)
-
-const percRng =
-  makeRng(RHYTHM_SEED + 505)
-
-const stabRng =
-  makeRng(RHYTHM_SEED + 606)
-
-const motifRng =
-  makeRng(RHYTHM_SEED + 707)
-
-
-// ============================================================
-// RHYTHMIC PERSONALITY
-// ============================================================
-
-const syncAmount =
-  kickRng()
-
-const swingAmount =
-  bassRng()
-
-const tripletAmount =
-  hatRng()
-
-const density =
-  percRng()
-
-const hatAmount =
-  clapRng()
-
-
-// ============================================================
-// HARMONY
-// ============================================================
-
 const keys = [
-
-  // ----------------------------------------------------------
-  // A MINOR
-  // ----------------------------------------------------------
-
-  {
-    name: "A minor",
-
-    chords: [
-
-      {
-        bass: "a1",
-        stab: "[a2,c3,e3]"
-      },
-
-      {
-        bass: "c2",
-        stab: "[c3,e3,g3]"
-      },
-
-      {
-        bass: "d2",
-        stab: "[d3,f3,a3]"
-      },
-
-      {
-        bass: "e2",
-        stab: "[e3,g3,b3]"
-      },
-
-      {
-        bass: "f1",
-        stab: "[f2,a2,c3]"
-      },
-
-      {
-        bass: "g1",
-        stab: "[g2,b2,d3]"
-      }
-
-    ]
-  },
-
-
-  // ----------------------------------------------------------
-  // C MINOR
-  // ----------------------------------------------------------
-
-  {
-    name: "C minor",
-
-    chords: [
-
-      {
-        bass: "c1",
-        stab: "[c2,eb3,g3]"
-      },
-
-      {
-        bass: "eb1",
-        stab: "[eb2,g3,bb3]"
-      },
-
-      {
-        bass: "f1",
-        stab: "[f2,ab2,c3]"
-      },
-
-      {
-        bass: "g1",
-        stab: "[g2,bb2,d3]"
-      },
-
-      {
-        bass: "ab1",
-        stab: "[ab2,c3,eb3]"
-      },
-
-      {
-        bass: "bb1",
-        stab: "[bb2,d3,f3]"
-      }
-
-    ]
-  },
-
-
-  // ----------------------------------------------------------
-  // D MINOR
-  // ----------------------------------------------------------
-
-  {
-    name: "D minor",
-
-    chords: [
-
-      {
-        bass: "d1",
-        stab: "[d2,f3,a3]"
-      },
-
-      {
-        bass: "f1",
-        stab: "[f2,a2,c3]"
-      },
-
-      {
-        bass: "g1",
-        stab: "[g2,bb2,d3]"
-      },
-
-      {
-        bass: "a1",
-        stab: "[a2,c3,e3]"
-      },
-
-      {
-        bass: "bb1",
-        stab: "[bb2,d3,f3]"
-      },
-
-      {
-        bass: "c2",
-        stab: "[c3,e3,g3]"
-      }
-
-    ]
-  },
-
-
-  // ----------------------------------------------------------
-  // E MINOR
-  // ----------------------------------------------------------
-
-  {
-    name: "E minor",
-
-    chords: [
-
-      {
-        bass: "e1",
-        stab: "[e2,g3,b3]"
-      },
-
-      {
-        bass: "g1",
-        stab: "[g2,b2,d3]"
-      },
-
-      {
-        bass: "a1",
-        stab: "[a2,c3,e3]"
-      },
-
-      {
-        bass: "b1",
-        stab: "[b2,d3,f#3]"
-      },
-
-      {
-        bass: "c2",
-        stab: "[c3,e3,g3]"
-      },
-
-      {
-        bass: "d1",
-        stab: "[d2,f#3,a3]"
-      }
-
-    ]
-  },
-
-
-  // ----------------------------------------------------------
-  // F MINOR
-  // ----------------------------------------------------------
-
-  {
-    name: "F minor",
-
-    chords: [
-
-      {
-        bass: "f1",
-        stab: "[f2,ab2,c3]"
-      },
-
-      {
-        bass: "ab1",
-        stab: "[ab2,c3,eb3]"
-      },
-
-      {
-        bass: "bb1",
-        stab: "[bb2,d3,f3]"
-      },
-
-      {
-        bass: "c2",
-        stab: "[c3,eb3,g3]"
-      },
-
-      {
-        bass: "db2",
-        stab: "[db3,f3,ab3]"
-      },
-
-      {
-        bass: "eb1",
-        stab: "[eb2,g3,bb3]"
-      }
-
-    ]
-  },
-
-
-  // ----------------------------------------------------------
-  // G MINOR
-  // ----------------------------------------------------------
-
-  {
-    name: "G minor",
-
-    chords: [
-
-      {
-        bass: "g1",
-        stab: "[g2,bb2,d3]"
-      },
-
-      {
-        bass: "bb1",
-        stab: "[bb2,d3,f3]"
-      },
-
-      {
-        bass: "c2",
-        stab: "[c3,eb3,g3]"
-      },
-
-      {
-        bass: "d1",
-        stab: "[d2,f3,a3]"
-      },
-
-      {
-        bass: "eb1",
-        stab: "[eb2,g3,bb3]"
-      },
-
-      {
-        bass: "f1",
-        stab: "[f2,a2,c3]"
-      }
-
-    ]
-  },
-
-
-  // ----------------------------------------------------------
-  // G# MINOR
-  // ----------------------------------------------------------
-
-  {
-    name: "G# minor",
-
-    chords: [
-
-      {
-        bass: "g#1",
-        stab: "[g#2,b2,d#3]"
-      },
-
-      {
-        bass: "b1",
-        stab: "[b2,d#3,f#3]"
-      },
-
-      {
-        bass: "c#2",
-        stab: "[c#3,e3,g#3]"
-      },
-
-      {
-        bass: "d#1",
-        stab: "[d#2,f#3,a#3]"
-      },
-
-      {
-        bass: "e1",
-        stab: "[e2,g#3,b3]"
-      },
-
-      {
-        bass: "f#1",
-        stab: "[f#2,a#2,c#3]"
-      }
-
-    ]
-  }
-
+  { name: "A minor", chords: [{ bass: "a1", stab: "[a2,c3,e3]" }, { bass: "c2", stab: "[c3,e3,g3]" }, { bass: "d2", stab: "[d3,f3,a3]" }, { bass: "e2", stab: "[e3,g3,b3]" }, { bass: "f1", stab: "[f2,a2,c3]" }, { bass: "g1", stab: "[g2,b2,d3]" }] },
+  { name: "C minor", chords: [{ bass: "c1", stab: "[c2,eb3,g3]" }, { bass: "eb1", stab: "[eb2,g3,bb3]" }, { bass: "f1", stab: "[f2,ab2,c3]" }, { bass: "g1", stab: "[g2,bb2,d3]" }, { bass: "ab1", stab: "[ab2,c3,eb3]" }, { bass: "bb1", stab: "[bb2,d3,f3]" }] },
+  { name: "D minor", chords: [{ bass: "d1", stab: "[d2,f3,a3]" }, { bass: "f1", stab: "[f2,a2,c3]" }, { bass: "g1", stab: "[g2,bb2,d3]" }, { bass: "a1", stab: "[a2,c3,e3]" }, { bass: "bb1", stab: "[bb2,d3,f3]" }, { bass: "c2", stab: "[c3,e3,g3]" }] },
+  { name: "E minor", chords: [{ bass: "e1", stab: "[e2,g3,b3]" }, { bass: "g1", stab: "[g2,b2,d3]" }, { bass: "a1", stab: "[a2,c3,e3]" }, { bass: "b1", stab: "[b2,d3,f#3]" }, { bass: "c2", stab: "[c3,e3,g3]" }, { bass: "d1", stab: "[d2,f#3,a3]" }] },
+  { name: "F minor", chords: [{ bass: "f1", stab: "[f2,ab2,c3]" }, { bass: "ab1", stab: "[ab2,c3,eb3]" }, { bass: "bb1", stab: "[bb2,d3,f3]" }, { bass: "c2", stab: "[c3,eb3,g3]" }, { bass: "db2", stab: "[db3,f3,ab3]" }, { bass: "eb1", stab: "[eb2,g3,bb3]" }] },
+  { name: "G minor", chords: [{ bass: "g1", stab: "[g2,bb2,d3]" }, { bass: "bb1", stab: "[bb2,d3,f3]" }, { bass: "c2", stab: "[c3,eb3,g3]" }, { bass: "d1", stab: "[d2,f3,a3]" }, { bass: "eb1", stab: "[eb2,g3,bb3]" }, { bass: "f1", stab: "[f2,a2,c3]" }] },
+  { name: "G# minor", chords: [{ bass: "g#1", stab: "[g#2,b2,d#3]" }, { bass: "b1", stab: "[b2,d#3,f#3]" }, { bass: "c#2", stab: "[c#3,e3,g#3]" }, { bass: "d#1", stab: "[d#2,f#3,a#3]" }, { bass: "e1", stab: "[e2,g#3,b3]" }, { bass: "f#1", stab: "[f#2,a#2,c#3]" }] }
 ]
 
+const selectedKey = pick(keys, harmonyRng)
+const progressions = [[0, 4, 2, 5], [0, 5, 4, 3], [0, 2, 4, 5], [0, 4, 5, 3], [0, 5, 2, 4], [0, 2, 5, 4], [4, 5, 0, 2], [0, 3, 4, 5]]
+const progression = pick(progressions, harmonyRng)
+const chords = progression.map(idx => selectedKey.chords[idx])
 
 // ============================================================
-// SELECT KEY
+// RHYTHM PATTERNS
 // ============================================================
+const kickPatterns = ["36 ~ ~ ~ 36 ~ ~ ~ 36 ~ ~ ~ 36 ~ ~ ~", "36 ~ ~ 36 ~ ~ ~ ~ 36 ~ ~ 36 ~ ~ ~ ~", "36 ~ 36 ~ 36 ~ ~ ~ 36 ~ ~ 36 ~ ~ 36 ~", "36 ~ ~ ~ 36 ~ ~ 36 36 ~ ~ ~ 36 ~ ~ 36", "36 ~ ~ 36 ~ 36 ~ ~ 36 ~ ~ 36 ~ 36 ~ ~", "36 ~ ~ 36 ~ ~ 36 ~ 36 ~ ~ ~ 36 ~ 36 ~"]
+const bassPatterns = ["x ~ ~ ~ x ~ ~ ~ x ~ ~ ~ x ~ ~ ~", "x ~ ~ x ~ ~ x ~ x ~ ~ x ~ ~ x ~", "x ~ x ~ ~ x ~ ~ x ~ ~ x ~ x ~ ~", "x ~ x ~ x ~ ~ x x ~ ~ x ~ ~ x ~", "x ~ ~ x x ~ ~ x ~ x ~ ~ x ~ ~ x", "x ~ ~ ~ ~ ~ x ~ x ~ ~ ~ ~ ~ x ~"]
+const hatPatterns = ["42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~", "~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42", "42 ~ 42 42 ~ 42 ~ 42 42 ~ 42 ~ 42 ~ 42 ~", "~ 42 42 ~ 42 ~ 42 42 ~ 42 ~ 42 42 ~ 42 ~", "42 42 ~ 42 42 ~ 42 42 ~ 42 ~ 42 42 ~ 42 ~"]
+const tripletPatterns = ["[42 42 42]*4", "[42 ~ 42]*4", "[42 42 ~]*4"]
+const openHatPatterns = ["46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~ ~", "~ ~ 46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~ 46 ~ ~", "~ 46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~"]
+const clapPatterns = ["~ ~ ~ ~ 38 ~ ~ ~ ~ ~ ~ ~ 38 ~ ~ ~", "~ ~ ~ ~ 38 ~ ~ ~ ~ 38 ~ ~ ~ ~ ~ ~", "~ ~ ~ ~ 38 ~ ~ 38 ~ ~ ~ ~ 38 ~ ~ ~"]
+const percPatterns = ["~ ~ 44 ~ ~ ~ 44 ~ ~ ~ 44 ~", "~ 45 ~ ~ 44 ~ ~ 45 ~ ~ 44 ~ ~ 45 ~ ~", "~ ~ 44 ~ 45 ~ ~ ~ 44 ~ ~ 45 ~ ~ 44 ~", "44 ~ ~ 45 ~ 44 ~ ~ ~ 45 ~ ~ 44 ~ ~ ~"]
+const stabPatterns = ["~ ~ x ~ ~ ~ ~ ~ ~ ~ x ~ ~ ~ ~ ~", "~ ~ x ~ ~ ~ x ~ ~ ~ ~ ~ x ~ ~ ~", "~ ~ x ~ x ~ ~ ~ ~ ~ x ~ ~ ~ x ~", "~ ~ ~ x ~ ~ x ~ ~ ~ x ~ ~ x ~ ~", "~ x ~ ~ ~ x ~ ~ ~ x ~ ~ ~ x ~ ~"]
+const motifPatterns = ["~ ~ ~ ~ e4 ~ ~ ~ ~ ~ d4 ~ ~ ~ c4 ~", "e4 ~ ~ ~ ~ d4 ~ ~ c4 ~ ~ ~ ~ d4 ~ ~", "~ e4 ~ ~ d4 ~ ~ ~ c4 ~ ~ d4 ~ ~ ~ ~", "~ ~ e4 ~ ~ ~ d4 ~ ~ ~ ~ c4 ~ ~ d4 ~"]
 
-const selectedKey =
-  pick(keys, harmonyRng)
-
-
-// ============================================================
-// PROGRESSION LIBRARY
-//
-// Scale positions:
-//
-// 0 = i
-// 1 = III
-// 2 = iv
-// 3 = v
-// 4 = VI
-// 5 = VII
-// ============================================================
-
-const progressions = [
-
-  [0, 4, 2, 5],
-
-  [0, 5, 4, 3],
-
-  [0, 2, 4, 5],
-
-  [0, 4, 5, 3],
-
-  [0, 5, 2, 4],
-
-  [0, 2, 5, 4],
-
-  [4, 5, 0, 2],
-
-  [0, 3, 4, 5]
-
-]
-
-
-const progression =
-  pick(
-    progressions,
-    harmonyRng
-  )
-
-
-const chord1 =
-  selectedKey.chords[progression[0]]
-
-const chord2 =
-  selectedKey.chords[progression[1]]
-
-const chord3 =
-  selectedKey.chords[progression[2]]
-
-const chord4 =
-  selectedKey.chords[progression[3]]
-
+const getKick = () => pick(kickPatterns, kickRng)
+const getBass = () => pick(bassPatterns, bassRng)
+const getHats = () => (tripletAmount > 0.70 && chance(0.55, hatRng)) ? pick(tripletPatterns, hatRng) : pick(hatPatterns, hatRng)
+const getOpenHat = () => pick(openHatPatterns, hatRng)
+const getClap = () => pick(clapPatterns, clapRng)
+const getPerc = () => pick(percPatterns, percRng)
+const getStab = () => pick(stabPatterns, stabRng)
+const getMotif = () => pick(motifPatterns, motifRng)
 
 // ============================================================
-// KICK PATTERNS
+// DYNAMIC BUILDER & ARRANGEMENT
 // ============================================================
-
-const kickPatterns = [
-
-  "36 ~ ~ ~ 36 ~ ~ ~ 36 ~ ~ ~ 36 ~ ~ ~",
-
-  "36 ~ ~ 36 ~ ~ ~ ~ 36 ~ ~ 36 ~ ~ ~ ~",
-
-  "36 ~ 36 ~ 36 ~ ~ ~ 36 ~ ~ 36 ~ ~ 36 ~",
-
-  "36 ~ ~ ~ 36 ~ ~ 36 36 ~ ~ ~ 36 ~ ~ 36",
-
-  "36 ~ ~ 36 ~ 36 ~ ~ 36 ~ ~ 36 ~ 36 ~ ~",
-
-  "36 ~ ~ 36 ~ ~ 36 ~ 36 ~ ~ ~ 36 ~ 36 ~"
-
-]
-
-
-// ============================================================
-// BASS PATTERNS
-// ============================================================
-
-const bassPatterns = [
-
-  "x ~ ~ ~ x ~ ~ ~ x ~ ~ ~ x ~ ~ ~",
-
-  "x ~ ~ x ~ ~ x ~ x ~ ~ x ~ ~ x ~",
-
-  "x ~ x ~ ~ x ~ ~ x ~ ~ x ~ x ~ ~",
-
-  "x ~ x ~ x ~ ~ x x ~ ~ x ~ ~ x ~",
-
-  "x ~ ~ x x ~ ~ x ~ x ~ ~ x ~ ~ x",
-
-  "x ~ ~ ~ ~ ~ x ~ x ~ ~ ~ ~ ~ x ~"
-
-]
-
-
-// ============================================================
-// HATS
-// ============================================================
-
-const hatPatterns = [
-
-  "42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~",
-
-  "~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42 ~ 42",
-
-  "42 ~ 42 42 ~ 42 ~ 42 42 ~ 42 ~ 42 ~ 42 ~",
-
-  "~ 42 42 ~ 42 ~ 42 42 ~ 42 ~ 42 42 ~ 42 ~",
-
-  "42 42 ~ 42 42 ~ 42 42 ~ 42 ~ 42 42 ~ 42 ~"
-
-]
-
-
-// ============================================================
-// TRIPLETS
-// ============================================================
-
-const tripletPatterns = [
-
-  "[42 42 42]*4",
-
-  "[42 ~ 42]*4",
-
-  "[42 42 ~]*4"
-
-]
-
-
-// ============================================================
-// OPEN HATS
-// ============================================================
-
-const openHatPatterns = [
-
-  "46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~ ~",
-
-  "~ ~ 46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~ 46 ~ ~",
-
-  "~ 46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~ ~ 46 ~ ~"
-
-]
-
-
-// ============================================================
-// CLAP
-// ============================================================
-
-const clapPatterns = [
-
-  "~ ~ ~ ~ 38 ~ ~ ~ ~ ~ ~ ~ 38 ~ ~ ~",
-
-  "~ ~ ~ ~ 38 ~ ~ ~ ~ 38 ~ ~ ~ ~ ~ ~",
-
-  "~ ~ ~ ~ 38 ~ ~ 38 ~ ~ ~ ~ 38 ~ ~ ~"
-
-]
-
-
-// ============================================================
-// PERCUSSION
-// ============================================================
-
-const percPatterns = [
-
-  "~ ~ 44 ~ ~ ~ 44 ~ ~ ~ 44 ~ ~ ~ 44 ~",
-
-  "~ 45 ~ ~ 44 ~ ~ 45 ~ ~ 44 ~ ~ 45 ~ ~",
-
-  "~ ~ 44 ~ 45 ~ ~ ~ 44 ~ ~ 45 ~ ~ 44 ~",
-
-  "44 ~ ~ 45 ~ 44 ~ ~ ~ 45 ~ ~ 44 ~ ~ ~"
-
-]
-
-
-// ============================================================
-// STABS
-// ============================================================
-
-const stabPatterns = [
-
-  "~ ~ x ~ ~ ~ ~ ~ ~ ~ x ~ ~ ~ ~ ~",
-
-  "~ ~ x ~ ~ ~ x ~ ~ ~ ~ ~ x ~ ~ ~",
-
-  "~ ~ x ~ x ~ ~ ~ ~ ~ x ~ ~ ~ x ~",
-
-  "~ ~ ~ x ~ ~ x ~ ~ ~ x ~ ~ x ~ ~",
-
-  "~ x ~ ~ ~ x ~ ~ ~ x ~ ~ ~ x ~ ~"
-
-]
-
-
-// ============================================================
-// MOTIF
-// ============================================================
-
-const motifPatterns = [
-
-  "~ ~ ~ ~ e4 ~ ~ ~ ~ ~ d4 ~ ~ ~ c4 ~",
-
-  "e4 ~ ~ ~ ~ d4 ~ ~ c4 ~ ~ ~ ~ d4 ~ ~",
-
-  "~ e4 ~ ~ d4 ~ ~ ~ c4 ~ ~ d4 ~ ~ ~ ~",
-
-  "~ ~ e4 ~ ~ ~ d4 ~ ~ ~ ~ c4 ~ ~ d4 ~"
-
-]
-
-
-// ============================================================
-// RHYTHM GENERATORS
-// ============================================================
-
-function getKick() {
-
-  return pick(
-    kickPatterns,
-    kickRng
-  )
-
+const drum = p => p.midichan(drumChan).midi(midi)
+const bass = p => p.midichan(bassChan).midi(midi)
+const stab = p => p.midichan(stabChan).midi(midi)
+const motif = p => p.midichan(motifChan).midi(midi)
+
+function buildDynamicSection(energy, currentChord) {
+  const layers = [
+    drum(note(getKick()).velocity("1 .82 .95 .86")),
+    drum(note(getHats()).velocity(".38 .15 .30 .13"))
+  ]
+  if (energy >= 1) layers.push(drum(note(getClap()).velocity(".75")))
+  if (chance(CFG.chances.perc, arcRng)) layers.push(drum(note(getPerc()).velocity(".22 .32 .18")))
+  if (energy >= 2 && chance(CFG.chances.open, arcRng)) layers.push(drum(note(getOpenHat()).velocity(".30")))
+  if (energy >= 1) layers.push(bass(note(currentChord.bass).struct(getBass()).sustain(0.16).velocity(".9 .70 .82")))
+  if (energy >= 1 && energy < 3) layers.push(stab(note(currentChord.stab).struct(getStab()).sustain(0.08).velocity(".45 .28")))
+  if (energy >= 2 && chance(CFG.chances.motif, arcRng)) layers.push(motif(note(getMotif()).velocity(".3 .22 .35 .2").sustain(.06)))
+  
+  return stack(...layers)
 }
 
-
-function getBass() {
-
-  return pick(
-    bassPatterns,
-    bassRng
-  )
-
+function buildArrangement() {
+  return generateArc().map((energy, idx) => [
+    4, buildDynamicSection(energy, chords[Math.floor(idx / (CFG.sections / 4)) % 4])
+  ])
 }
 
-
-function getHats() {
-
-  if (
-    tripletAmount > 0.70 &&
-    chance(0.55, hatRng)
-  ) {
-
-    return pick(
-      tripletPatterns,
-      hatRng
-    )
-
-  }
-
-  return pick(
-    hatPatterns,
-    hatRng
-  )
-
-}
-
-
-function getOpenHat() {
-
-  return pick(
-    openHatPatterns,
-    hatRng
-  )
-
-}
-
-
-function getClap() {
-
-  return pick(
-    clapPatterns,
-    clapRng
-  )
-
-}
-
-
-function getPerc() {
-
-  return pick(
-    percPatterns,
-    percRng
-  )
-
-}
-
-
-function getStab() {
-
-  return pick(
-    stabPatterns,
-    stabRng
-  )
-
-}
-
-
-function getMotif() {
-
-  return pick(
-    motifPatterns,
-    motifRng
-  )
-
-}
-
-
-// ============================================================
-// ARRANGEMENT
-// ============================================================
-
-function buildArrangement(
-  totalCycles = 64,
-  blockSize = 4
-) {
-
-  const blocks =
-    totalCycles / blockSize
-
-  const timeline = []
-
-
-  for (
-    let b = 0;
-    b < blocks;
-    b++
-  ) {
-
-    const progress =
-      b / (blocks - 1)
-
-
-    const layers = []
-
-
-    // ========================================================
-    // CHORD
-    // ========================================================
-
-    const chordIndex =
-      Math.floor(b / 4)
-
-
-    let currentChord
-
-
-    if (chordIndex === 0) {
-
-      currentChord = chord1
-
-    }
-
-    else if (chordIndex === 1) {
-
-      currentChord = chord2
-
-    }
-
-    else if (chordIndex === 2) {
-
-      currentChord = chord3
-
-    }
-
-    else {
-
-      currentChord = chord4
-
-    }
-
-
-    // ========================================================
-    // KICK — CHANNEL 1
-    // ========================================================
-
-    layers.push(
-
-      drum(
-
-        note(
-          getKick()
-        )
-
-        .velocity(
-          "1 .82 .95 .86"
-        )
-
-      )
-
-    )
-
-
-    // ========================================================
-    // CLAP — CHANNEL 1
-    // ========================================================
-
-    if (progress >= 0.125) {
-
-      layers.push(
-
-        drum(
-
-          note(
-            getClap()
-          )
-
-          .velocity(".75")
-
-        )
-
-      )
-
-    }
-
-
-    // ========================================================
-    // CLOSED HATS — CHANNEL 1
-    // ========================================================
-
-    if (progress >= 0.05) {
-
-      layers.push(
-
-        drum(
-
-          note(
-            getHats()
-          )
-
-          .velocity(
-            ".38 .15 .30 .13"
-          )
-
-        )
-
-      )
-
-    }
-
-
-    // ========================================================
-    // OPEN HAT — CHANNEL 1
-    // ========================================================
-
-    if (
-      progress >= 0.25 &&
-      hatAmount > 0.35
-    ) {
-
-      layers.push(
-
-        drum(
-
-          note(
-            getOpenHat()
-          )
-
-          .velocity(".30")
-
-        )
-
-      )
-
-    }
-
-
-    // ========================================================
-    // PERCUSSION — CHANNEL 1
-    // ========================================================
-
-    if (
-      progress >= 0.20 &&
-      density > 0.30
-    ) {
-
-      layers.push(
-
-        drum(
-
-          note(
-            getPerc()
-          )
-
-          .velocity(
-            ".22 .32 .18"
-          )
-
-        )
-
-      )
-
-    }
-
-
-    // ========================================================
-    // BASS — CHANNEL 2
-    // ========================================================
-
-    if (progress >= 0.125) {
-
-      layers.push(
-
-        bass(
-
-          note(
-            currentChord.bass
-          )
-
-          .struct(
-            getBass()
-          )
-
-          .sustain(0.16)
-
-          .velocity(
-            ".9 .70 .82"
-          )
-
-        )
-
-      )
-
-    }
-
-
-    // ========================================================
-    // STABS — CHANNEL 3
-    // ========================================================
-
-    if (
-      progress >= 0.35 &&
-      progress < 0.90
-    ) {
-
-      layers.push(
-
-        stab(
-
-          note(
-            currentChord.stab
-          )
-
-          .struct(
-            getStab()
-          )
-
-          .sustain(0.08)
-
-          .velocity(
-            ".45 .28"
-          )
-
-        )
-
-      )
-
-    }
-
-
-    // ========================================================
-    // MOTIF — CHANNEL 4
-    // ========================================================
-
-    if (progress >= 0.50) {
-
-      layers.push(
-
-        motif(
-
-          note(
-            getMotif()
-          )
-
-          .sustain(0.12)
-
-          .velocity(
-            ".30 .18"
-          )
-
-        )
-
-      )
-
-    }
-
-
-    // ========================================================
-    // TIMELINE
-    // ========================================================
-
-    timeline.push(
-
-      [
-        blockSize,
-        stack(...layers)
-      ]
-
-    )
-
-  }
-
-
-  return timeline
-
-}
-
-
-// ============================================================
-// RUN
-// ============================================================
-
-$: arrange(
-  ...buildArrangement(64, 4)
-)
+$: arrange(...buildArrangement())
