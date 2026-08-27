@@ -19,6 +19,7 @@ const drumChan  = 1
 const bassChan  = 2
 const stabChan  = 3
 const motifChan = 4
+const voiceChan = 5
 
 
 const drum = p =>
@@ -32,6 +33,9 @@ const stab = p =>
 
 const motif = p =>
   p.midichan(motifChan).midi(midi)
+
+const voice = p =>
+  p.midichan(voiceChan).midi(midi)
 
 
 // ============================================================
@@ -100,6 +104,9 @@ const stabRng =
 const motifRng =
   makeRng(RHYTHM_SEED + 707)
 
+const voiceRng =
+  makeRng(RHYTHM_SEED + 808)
+
 
 // ============================================================
 // RHYTHMIC PERSONALITY
@@ -120,6 +127,9 @@ const density =
 const hatAmount =
   clapRng()
 
+const vocalPresence =
+  voiceRng()
+
 
 // ============================================================
 // HARMONY
@@ -138,32 +148,38 @@ const keys = [
 
       {
         bass: "a1",
-        stab: "[a2,c3,e3]"
+        stab: "[a2,c3,e3]",
+        voice: "[a3,e4]"
       },
 
       {
         bass: "c2",
-        stab: "[c3,e3,g3]"
+        stab: "[c3,e3,g3]",
+        voice: "[c4,g4]"
       },
 
       {
         bass: "d2",
-        stab: "[d3,f3,a3]"
+        stab: "[d3,f3,a3]",
+        voice: "[d4,a4]"
       },
 
       {
         bass: "e2",
-        stab: "[e3,g3,b3]"
+        stab: "[e3,g3,b3]",
+        voice: "[e4,b4]"
       },
 
       {
         bass: "f1",
-        stab: "[f2,a2,c3]"
+        stab: "[f2,a2,c3]",
+        voice: "[f3,c4]"
       },
 
       {
         bass: "g1",
-        stab: "[g2,b2,d3]"
+        stab: "[g2,b2,d3]",
+        voice: "[g3,d4]"
       }
 
     ]
@@ -181,32 +197,38 @@ const keys = [
 
       {
         bass: "c1",
-        stab: "[c2,eb3,g3]"
+        stab: "[c2,eb3,g3]",
+        voice: "[c4,g4]"
       },
 
       {
         bass: "eb1",
-        stab: "[eb2,g3,bb3]"
+        stab: "[eb2,g3,bb3]",
+        voice: "[eb4,bb4]"
       },
 
       {
         bass: "f1",
-        stab: "[f2,ab2,c3]"
+        stab: "[f2,ab2,c3]",
+        voice: "[f3,c4]"
       },
 
       {
         bass: "g1",
-        stab: "[g2,bb2,d3]"
+        stab: "[g2,bb2,d3]",
+        voice: "[g3,d4]"
       },
 
       {
         bass: "ab1",
-        stab: "[ab2,c3,eb3]"
+        stab: "[ab2,c3,eb3]",
+        voice: "[ab3,eb4]"
       },
 
       {
         bass: "bb1",
-        stab: "[bb2,d3,f3]"
+        stab: "[bb2,d3,f3]",
+        voice: "[bb3,f4]"
       }
 
     ]
@@ -224,32 +246,38 @@ const keys = [
 
       {
         bass: "d1",
-        stab: "[d2,f3,a3]"
+        stab: "[d2,f3,a3]",
+        voice: "[d4,a4]"
       },
 
       {
         bass: "f1",
-        stab: "[f2,a2,c3]"
+        stab: "[f2,a2,c3]",
+        voice: "[f3,c4]"
       },
 
       {
         bass: "g1",
-        stab: "[g2,bb2,d3]"
+        stab: "[g2,bb2,d3]",
+        voice: "[g3,d4]"
       },
 
       {
         bass: "a1",
-        stab: "[a2,c3,e3]"
+        stab: "[a2,c3,e3]",
+        voice: "[a3,e4]"
       },
 
       {
         bass: "bb1",
-        stab: "[bb2,d3,f3]"
+        stab: "[bb2,d3,f3]",
+        voice: "[bb3,f4]"
       },
 
       {
         bass: "c2",
-        stab: "[c3,e3,g3]"
+        stab: "[c3,e3,g3]",
+        voice: "[c4,g4]"
       }
 
     ]
@@ -267,32 +295,38 @@ const keys = [
 
       {
         bass: "e1",
-        stab: "[e2,g3,b3]"
+        stab: "[e2,g3,b3]",
+        voice: "[e4,b4]"
       },
 
       {
         bass: "g1",
-        stab: "[g2,b2,d3]"
+        stab: "[g2,b2,d3]",
+        voice: "[g3,d4]"
       },
 
       {
         bass: "a1",
-        stab: "[a2,c3,e3]"
+        stab: "[a2,c3,e3]",
+        voice: "[a3,e4]"
       },
 
       {
         bass: "b1",
-        stab: "[b2,d3,f#3]"
+        stab: "[b2,d3,f#3]",
+        voice: "[b3,f#4]"
       },
 
       {
         bass: "c2",
-        stab: "[c3,e3,g3]"
+        stab: "[c3,e3,g3]",
+        voice: "[c4,g4]"
       },
 
       {
         bass: "d1",
-        stab: "[d2,f#3,a3]"
+        stab: "[d2,f#3,a3]",
+        voice: "[d4,a4]"
       }
 
     ]
@@ -310,32 +344,38 @@ const keys = [
 
       {
         bass: "f1",
-        stab: "[f2,ab2,c3]"
+        stab: "[f2,ab2,c3]",
+        voice: "[f3,c4]"
       },
 
       {
         bass: "ab1",
-        stab: "[ab2,c3,eb3]"
+        stab: "[ab2,c3,eb3]",
+        voice: "[ab3,eb4]"
       },
 
       {
         bass: "bb1",
-        stab: "[bb2,d3,f3]"
+        stab: "[bb2,d3,f3]",
+        voice: "[bb3,f4]"
       },
 
       {
         bass: "c2",
-        stab: "[c3,eb3,g3]"
+        stab: "[c3,eb3,g3]",
+        voice: "[c4,g4]"
       },
 
       {
         bass: "db2",
-        stab: "[db3,f3,ab3]"
+        stab: "[db3,f3,ab3]",
+        voice: "[db4,ab4]"
       },
 
       {
         bass: "eb1",
-        stab: "[eb2,g3,bb3]"
+        stab: "[eb2,g3,bb3]",
+        voice: "[eb4,bb4]"
       }
 
     ]
@@ -353,32 +393,38 @@ const keys = [
 
       {
         bass: "g1",
-        stab: "[g2,bb2,d3]"
+        stab: "[g2,bb2,d3]",
+        voice: "[g3,d4]"
       },
 
       {
         bass: "bb1",
-        stab: "[bb2,d3,f3]"
+        stab: "[bb2,d3,f3]",
+        voice: "[bb3,f4]"
       },
 
       {
         bass: "c2",
-        stab: "[c3,eb3,g3]"
+        stab: "[c3,eb3,g3]",
+        voice: "[c4,g4]"
       },
 
       {
         bass: "d1",
-        stab: "[d2,f3,a3]"
+        stab: "[d2,f3,a3]",
+        voice: "[d4,a4]"
       },
 
       {
         bass: "eb1",
-        stab: "[eb2,g3,bb3]"
+        stab: "[eb2,g3,bb3]",
+        voice: "[eb4,bb4]"
       },
 
       {
         bass: "f1",
-        stab: "[f2,a2,c3]"
+        stab: "[f2,a2,c3]",
+        voice: "[f3,c4]"
       }
 
     ]
@@ -396,32 +442,38 @@ const keys = [
 
       {
         bass: "g#1",
-        stab: "[g#2,b2,d#3]"
+        stab: "[g#2,b2,d#3]",
+        voice: "[g#3,d#4]"
       },
 
       {
         bass: "b1",
-        stab: "[b2,d#3,f#3]"
+        stab: "[b2,d#3,f#3]",
+        voice: "[b3,f#4]"
       },
 
       {
         bass: "c#2",
-        stab: "[c#3,e3,g#3]"
+        stab: "[c#3,e3,g#3]",
+        voice: "[c#4,g#4]"
       },
 
       {
         bass: "d#1",
-        stab: "[d#2,f#3,a#3]"
+        stab: "[d#2,f#3,a#3]",
+        voice: "[d#4,a#4]"
       },
 
       {
         bass: "e1",
-        stab: "[e2,g#3,b3]"
+        stab: "[e2,g#3,b3]",
+        voice: "[e4,b4]"
       },
 
       {
         bass: "f#1",
-        stab: "[f#2,a#2,c#3]"
+        stab: "[f#2,a#2,c#3]",
+        voice: "[f#3,c#4]"
       }
 
     ]
@@ -652,6 +704,25 @@ const motifPatterns = [
 
 
 // ============================================================
+// VOICE PATTERNS
+// ============================================================
+
+const voicePatterns = [
+
+  "x ~ ~ ~ ~ ~ ~ ~ x ~ ~ ~ ~ ~ ~ ~",
+
+  "~ ~ x ~ ~ ~ ~ ~ ~ ~ x ~ ~ ~ ~ ~",
+
+  "x ~ ~ ~ x ~ ~ ~ ~ ~ ~ ~ x ~ ~ ~",
+
+  "~ ~ ~ x ~ ~ x ~ ~ ~ ~ ~ ~ ~ x ~",
+
+  "x ~ ~ ~ ~ x ~ ~ ~ x ~ ~ ~ ~ ~ ~"
+
+]
+
+
+// ============================================================
 // RHYTHM GENERATORS
 // ============================================================
 
@@ -742,6 +813,16 @@ function getMotif() {
   return pick(
     motifPatterns,
     motifRng
+  )
+
+}
+
+
+function getVoice() {
+
+  return pick(
+    voicePatterns,
+    voiceRng
   )
 
 }
@@ -1000,23 +1081,30 @@ function buildArrangement(
 
 
     // ========================================================
-    // MOTIF — CHANNEL 4
+    // VOICE — CHANNEL 5
     // ========================================================
 
-    if (progress >= 0.50) {
+    if (
+      progress >= 0.50 &&
+      vocalPresence > 0.40
+    ) {
 
       layers.push(
 
-        motif(
+        voice(
 
           note(
-            getMotif()
+            currentChord.voice
           )
 
-          .sustain(0.12)
+          .struct(
+            getVoice()
+          )
+
+          .sustain(0.24)
 
           .velocity(
-            ".30 .18"
+            ".60 .40"
           )
 
         )
@@ -1026,31 +1114,12 @@ function buildArrangement(
     }
 
 
-    // ========================================================
-    // TIMELINE
-    // ========================================================
-
     timeline.push(
-
-      [
-        blockSize,
-        stack(...layers)
-      ]
-
+      ...layers
     )
 
   }
 
-
   return timeline
 
 }
-
-
-// ============================================================
-// RUN
-// ============================================================
-
-$: arrange(
-  ...buildArrangement(64, 4)
-)
