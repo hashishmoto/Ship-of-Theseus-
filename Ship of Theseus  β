@@ -1,4 +1,3 @@
-
 //  ░░      ░░░  ░░░░  ░░        ░░       ░░░░      ░░░        ░░        ░░  ░░░░  ░░        ░░░      ░░░        ░░  ░░░░  ░░░      ░░
 //  ▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒  ▒▒  ▒▒▒▒▒▒▒
 //  ▓▓      ▓▓▓        ▓▓▓▓▓  ▓▓▓▓▓       ▓▓▓  ▓▓▓▓  ▓▓      ▓▓▓▓▓▓▓  ▓▓▓▓▓        ▓▓      ▓▓▓▓▓      ▓▓▓      ▓▓▓▓  ▓▓▓▓  ▓▓▓      ▓▓
@@ -8,6 +7,7 @@
 
 
 setcpm(128/4)
+
 const HARMONY_SEED = 666
 const RHYTHM_SEED = 111
 const Weed = 420
@@ -18,6 +18,8 @@ const drumChan  = 1
 const bassChan  = 2
 const stabChan  = 3
 const motifChan = 4
+const subChan   = 5
+const voiceChan = 6
 
 // ============================================================
 // ENERGY ARC CONFIG
@@ -137,6 +139,8 @@ const drum = p => p.midichan(drumChan).midi(midi)
 const bass = p => p.midichan(bassChan).midi(midi)
 const stab = p => p.midichan(stabChan).midi(midi)
 const motif = p => p.midichan(motifChan).midi(midi)
+const subbass = p => p.midichan(subChan).midi(midi)
+const voice = p => p.midichan(voiceChan).midi(midi)
 
 function buildDynamicSection(energy, currentChord) {
   const layers = [
@@ -146,9 +150,15 @@ function buildDynamicSection(energy, currentChord) {
   if (energy >= 1) layers.push(drum(note(getClap()).velocity(".75")))
   if (chance(CFG.chances.perc, arcRng)) layers.push(drum(note(getPerc()).velocity(".22 .32 .18")))
   if (energy >= 2 && chance(CFG.chances.open, arcRng)) layers.push(drum(note(getOpenHat()).velocity(".30")))
-  if (energy >= 1) layers.push(bass(note(currentChord.bass).struct(getBass()).sustain(0.16).velocity(".9 .70 .82")))
+  if (energy >= 1) {
+    layers.push(bass(note(currentChord.bass).struct(getBass()).sustain(0.16).velocity(".9 .70 .82")))
+    layers.push(subbass(note(currentChord.bass).struct(getBass()).sustain(0.16).velocity(".9 .70 .82")))
+  }
   if (energy >= 1 && energy < 3) layers.push(stab(note(currentChord.stab).struct(getStab()).sustain(0.08).velocity(".45 .28")))
-  if (energy >= 2 && chance(CFG.chances.motif, arcRng)) layers.push(motif(note(getMotif()).velocity(".3 .22 .35 .2").sustain(.06)))
+  if (energy >= 2 && chance(CFG.chances.motif, arcRng)) {
+    layers.push(motif(note(getMotif()).velocity(".3 .22 .35 .2").sustain(.06)))
+    layers.push(voice(note(getMotif()).velocity(".3 .22 .35 .2").sustain(.06)))
+  }
 
   return stack(...layers)
 }
