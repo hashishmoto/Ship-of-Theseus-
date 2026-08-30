@@ -1,0 +1,534 @@
+// ===== The Ship of Theseus - v1.0 - lazy rebuild =====
+// Minimal techno drum generator, streamed as live MIDI into Ableton.
+// Nothing is precomputed. Every hit is decided lazily, per cycle, by a
+// deterministic hash of (voice, step, bar) - so this script stays the same
+// tiny size whether it runs for 3 minutes or 6 hours.
+//
+// Skeleton + ghost layer + energy/drop timeline + slowly evolving skeleton.
+// Energy and the skeleton chain are both bounded random walks, computed lazily
+// and incrementally - only as far as the music has actually played.
+// Deliberately no test/preview mode: every dial is a real musical parameter.
+
+// ---- MIDI out ----
+const midi = 'IAC Driver Bus 1';
+const drumChan = 1, bassChan = 2;
+
+// ---- bass ----
+// MIDI 36 is C2 - the register the reference tutorial EQs to 65-350 Hz.
+const BASS_OCTAVE = 36;
+const BASS_CLIP   = 0.55;  // note length as a fraction of the step. Short = rolling.
+// BASS_ROLL is the one bass dial: 0 = offbeats only, the sparse minimal reading.
+// 1 = a note on nearly every available 16th, the rolling warehouse reading.
+const BASS_ROLL     = 0.5;
+const BASS_OFFBEAT  = 0.85; // chance on the 'and' of each beat
+const BASS_SIXTEENTH = 0.55; // chance on the other 16ths, before BASS_ROLL scales it
+// Root-dominant with a few others thrown in, which is exactly what the
+// reference describes. Scale degrees, so these stay correct in major or minor.
+const BASS_CHOICES = [
+  { idx: 0, oct: 0, w: 0.76 },   // root
+  { idx: 0, oct: 1, w: 0.10 },   // root an octave up
+  { idx: 4, oct: 0, w: 0.08 },   // the fifth
+  { idx: 2, oct: 0, w: 0.06 },   // the third, minor or major to match the key
+];
+
+// ---- dials ----
+// All three are real musical parameters. There is no test/preview mode: any
+// time compression would change the density and drop cadence you are trying
+// to judge, so what you hear is always what the thing actually does.
+const SEED = 1;           // any integer - change for a different kit
+// DROP_PATIENCE is the timing dial. Measured across 3 seeds, first drop / avg gap:
+//   -20 = 1.1 / 2.2 min   -10 = 2.2 / 2.5 min   0 = 4.2 / 2.9 min
+//    15 = 4.2 / 3.7 min    30 = 5.8 / 3.9 min
+// Lower it if you want to hear a drop quickly while working on something else.
+const DROP_PATIENCE = 15;
+const E_START = 30;       // starting tension - barely affects drop timing, leave it alone
+
+// ---- swing ----
+// Stated the way every drum machine states it: 50 = dead straight, 66.7 = full
+// triplet shuffle. Techno lives around 54-62. At 125bpm, 56 percent moves a
+// note 14 ms late, 62 percent moves it 29 ms.
+//
+// SWING_GRID picks WHICH notes move, and it matters more than the percentage:
+//   8 - the standard 16th swing. Moves the odd 16ths, which here means the
+//       ghost layer. Your off-beat hats sit on even steps so they stay put.
+//       Subtle: the shuffle lives entirely in the micro-variation.
+//   4 - 8th swing. Moves the off-beat hats themselves (steps 2/6/10/14), the
+//       classic pushed-hat shuffle. Much more obvious, and twice the delay
+//       for the same percentage.
+// Either way the kick never moves - steps 0/4/8/12 sit in the first half of
+// every slice at both settings, so the four-on-the-floor grid stays exact and
+// everything that shifts is audible against it.
+const SWING_PCT  = 56;
+const SWING_GRID = 8;
+const SWING = (SWING_PCT - 50) / 50;
+
+const STEPS = 16;           // 16th-note grid, 1 cycle = 1 bar
+const BARS_PER_PHRASE = 4;  // energy moves once per phrase, matching the skeleton's own unit
+
+// signal(fn) builds a pattern lazily from a function of cycle time - fn is
+// called on query, not up front. That is the whole point of this rewrite.
+// Fallback via time.fmap in case signal is not exposed in the REPL globals.
+const sig = (typeof signal !== 'undefined') ? signal : (f) => time.fmap(f);
+
+// ---- deterministic randomness: a pure hash, no state, no precomputation ----
+// rnd(kind, a, b) is stable forever - the same bar always rolls the same way,
+// so this is reproducible without storing anything.
+function rnd(kind, a, b) {
+  let h = (kind * 374761393 + a * 668265263 + b * 2246822519 + SEED * 3266489917) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = Math.imul(h ^ (h >>> 16), 2246822507);
+  h = h ^ (h >>> 15);
+  return (h >>> 0) / 4294967296;
+}
+
+// ---- energy: a bounded random walk, one step per phrase ----
+// Computed lazily and cached, so it only ever runs as far as the music has
+// actually played. Deterministic: phrase N always resolves the same way.
+const E_MAX = 100;              // E_START is up with the dials - it starts above zero on purpose
+const CLIMB_LO = 0.5, CLIMB_HI = 2.0;                // energy gained per phrase
+const DROP_LO = 40 + DROP_PATIENCE;                  // below this: no drop possible
+const DROP_HI = Math.min(100, 90 + DROP_PATIENCE);   // at this: drop chance saturates
+const DROP_MAX_CHANCE = 0.18;                        // per-phrase chance at saturation
+const DROP_COOLDOWN = 4;        // phrases after a drop before another can fire
+const RELEASE_LO = 0.3, RELEASE_HI = 0.6; // partial release only, so tension trends upward
+
+const _walk = [{ e: E_START, drop: false, cool: 0, left: 0 }];
+function phrase(i) {
+  if (!(i >= 0)) i = 0;                        // also catches NaN
+  i = Math.min(i, _walk.length + 4096);        // never extend more than 4096 phrases in one call
+  while (_walk.length <= i) {
+    const n = _walk.length, p = _walk[n - 1];
+    let e = Math.min(E_MAX, p.e + CLIMB_LO + rnd(4, n, 0) * (CLIMB_HI - CLIMB_LO));
+    let drop = false, cool = p.cool, left = p.left;
+    if (left > 0) {
+      drop = true; left -= 1;                  // still inside a 2-phrase drop
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - DROP_LO) / (DROP_HI - DROP_LO)));
+      if (rnd(5, n, 0) < ramp * DROP_MAX_CHANCE) {
+        drop = true;
+        left = rnd(6, n, 0) < 0.3 ? 1 : 0;     // 30 percent of drops last 2 phrases
+        e = e * (1 - (RELEASE_LO + rnd(7, n, 0) * (RELEASE_HI - RELEASE_LO)));
+        cool = DROP_COOLDOWN;
+      }
+    }
+    _walk.push({ e, drop, cool, left });
+  }
+  return _walk[i];
+}
+// 0 at the starting baseline, 1 at full energy
+const efrac = st => Math.max(0, Math.min(1, (st.e - E_START) / (E_MAX - E_START)));
+
+// ================= KEY ENGINE (silent - nothing plays this yet) =================
+// Type the Open Key value your DJ software shows, e.g. '1m' or '9d'. Verified
+// mapping: 1m = A minor, 1d = C major, and Open Key = Camelot + 5.
+//
+// Open Key IS the circle of fifths with the numbers already in order, so the
+// notation hands us the cage for free. Adjacent numbers are a perfect fifth
+// apart; the same number with m/d swapped is the relative major/minor (same
+// seven notes, different centre). Those are exactly the two moves a DJ trusts,
+// so they are the only two moves allowed here.
+const OPEN_KEY = '1m';
+
+// Near-static on purpose. Dub and minimal techno vamp one harmony and get their
+// movement from filters and effects, not chord changes - so a key move is a
+// rare, structural event, not a progression. It can only happen on the bar the
+// kick returns from a drop, which is the one moment a change reads as intended.
+const KEY_MOVE_CHANCE = 0.10;   // chance of moving, per drop-return
+const KEY_RELATIVE_ODDS = 0.25; // of those moves, share that are m<->d instead of a fifth
+const MAX_KEY_DRIFT = 2;        // never more than this many fifths from what you entered
+
+const PITCH_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];   // natural minor
+const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
+
+// wheel number 1-12 -> root pitch class. Each +1 is a perfect fifth (+7 semitones).
+function rootOf(num, mode) {
+  const base = (7 * (num - 1)) % 12;            // 1d = C
+  return mode === 'm' ? (base + 9) % 12 : base; // relative minor sits 9 semitones up
+}
+function parseOpenKey(s) {
+  const m = String(s).trim().toLowerCase().match(/^(\d{1,2})([md])$/);
+  if (!m) return { num: 1, mode: 'm' };         // fall back to A minor rather than throw
+  return { num: Math.min(12, Math.max(1, +m[1])), mode: m[2] };
+}
+function keyName(k) {
+  return k.num + k.mode + ' (' + PITCH_NAMES[rootOf(k.num, k.mode)] + (k.mode === 'm' ? ' minor)' : ' major)');
+}
+// shortest way round a 12-position wheel
+function wheelDist(a, b) {
+  const d = Math.abs(a - b) % 12;
+  return Math.min(d, 12 - d);
+}
+
+const KEY_ORIGIN = parseOpenKey(OPEN_KEY);
+const _keys = [KEY_ORIGIN];
+// Same shape as the energy walk and the skeleton chain: lazy, incremental,
+// deterministic, and tethered so it can never wander out of your key's orbit.
+function keyAtPhrase(ph) {
+  if (!(ph >= 0)) ph = 0;
+  ph = Math.min(ph, _keys.length + 4096);
+  while (_keys.length <= ph) {
+    const n = _keys.length, prev = _keys[n - 1];
+    let next = prev;
+    // only consider moving on the phrase where the kick comes back
+    if (n > 0 && !phrase(n).drop && phrase(n - 1).drop && rnd(18, n, 0) < KEY_MOVE_CHANCE) {
+      if (rnd(19, n, 0) < KEY_RELATIVE_ODDS) {
+        next = { num: prev.num, mode: prev.mode === 'm' ? 'd' : 'm' }; // relative major/minor
+      } else {
+        const dir = rnd(20, n, 0) < 0.5 ? -1 : 1;
+        const num = ((prev.num - 1 + dir + 12) % 12) + 1;              // one fifth round the wheel
+        if (wheelDist(num, KEY_ORIGIN.num) <= MAX_KEY_DRIFT) next = { num, mode: prev.mode };
+      }
+    }
+    _keys.push(next);
+  }
+  return _keys[ph];
+}
+function keyAtBar(bar) { return keyAtPhrase(Math.floor(bar / BARS_PER_PHRASE)); }
+// what a melodic voice will ask for, once one exists
+function scaleAtBar(bar) {
+  const k = keyAtBar(bar);
+  return { root: rootOf(k.num, k.mode), steps: k.mode === 'm' ? MINOR_SCALE : MAJOR_SCALE, key: k };
+}
+
+// ---- diagnostic: prints the key schedule to the browser console ----
+// Delete this block once a voice actually uses the key. It is a one-off readout,
+// not part of the pattern - nothing here is precomputed for playback.
+function logKeySchedule(phrases) {
+  const secsPerPhrase = BARS_PER_PHRASE * 1.92; // at 125bpm
+  const out = ['key ' + keyName(KEY_ORIGIN) + ' - schedule for the next ' +
+               (phrases * secsPerPhrase / 60).toFixed(0) + ' min:'];
+  let prev = null;
+  for (let p = 0; p < phrases; p++) {
+    const k = keyAtPhrase(p);
+    if (!prev || k.num !== prev.num || k.mode !== prev.mode) {
+      const mins = p * secsPerPhrase / 60;
+      out.push('  ' + mins.toFixed(1) + ' min  ' + keyName(k) +
+               (prev ? '  (' + wheelDist(k.num, KEY_ORIGIN.num) + ' fifths from home)' : '  START'));
+      prev = k;
+    }
+  }
+  if (out.length === 1) out.push('  no key changes in this window - as intended');
+  console.log(out.join('\n'));
+}
+logKeySchedule(500);
+// =============================== end key engine ===============================
+
+// ---- caged velocity ranges ----
+const SKEL_VEL_LO = 0.75, SKEL_VEL_HI = 0.95;   // main hits, fixed
+const MAX_GHOST = 0.35;                          // cap on ghost chance per empty step
+// ghost density and loudness both rise with energy, each inside its own cage.
+// Ghost velocity stays under the skeleton floor even at full energy.
+const WANDER_LO = 0.15, WANDER_HI = 0.85;
+const GVEL_LO_A = 0.30, GVEL_LO_B = 0.40;
+const GVEL_HI_A = 0.50, GVEL_HI_B = 0.65;
+
+// ---- voices: per-step probability profiles are the cage ----
+// Calibrated against a real minimal techno breakdown, not guessed.
+// kick stays near-rigid on purpose - the genre varies the kick by dropping it
+// out entirely (stage 2), not by moving it around.
+// ghost is a per-voice weight on ghost density. Testing showed a single global
+// WANDER put 2+ extra kicks in every bar, which is far too busy for this genre -
+// the kick has to stay near-rigid while hats and rim can carry the movement.
+// dropsOut: goes silent for the whole drop. Only the kick does that - the rest
+// just thin out as energy falls, which is closer to how a real breakdown sounds.
+// drift is how willing a voice is to have its skeleton mutate between sections.
+// The kick is pinned at 0 on purpose. At drift 0.15 its 0.97 steps still came
+// back off about 3 percent of the time, which over a long set meant occasionally
+// losing one of the four downbeats or gaining a fifth loud kick - measured at
+// 3 to 5 kicks per bar. Rare and wrong is worse than never: that is the one
+// deviation this genre does not make. The kick already varies the right way,
+// by dropping out entirely and by quiet ghosts.
+//
+// Fields on the optional voices:
+//   include   chance this voice is in a given seed's kit at all
+//   notes     redundant rack slots - one is picked per seed, not all used
+//   minEnergy voice stays silent below this energy, so it arrives as things build
+//   accent    per-step velocity multiplier for the skeleton hits
+//   role      'marker' means it is a structural one-shot, not a loop voice
+const VOICES = [
+  // ---- core: the kit that defines the track ----
+  // Kick velocity: the point is NOT randomness. Measured, the old uniform roll
+  // made all four downbeats statistically identical (mean 0.85 each) - that is
+  // noise, not humanisation, and the humanising guides explicitly warn against
+  // random velocity. A drummer hits beat 1 hardest, beat 3 next, 2 and 4 a
+  // touch softer, so that shape is the accent below. The jitter is deliberately
+  // narrow (vel) - just enough that no two kicks are the identical sample,
+  // which is the actual reason to vary a four-on-the-floor kick at all.
+  { name: 'kick', note: 36, include: 1.00, ghost: 0.25, drift: 0, dropsOut: true,
+    vel: [0.88, 0.96],
+    accent: [1.00,1,1,1, 0.95,1,1,1, 0.975,1,1,1, 0.95,1,1,1],
+    profile: [
+    0.97,0.02,0.02,0.02, 0.97,0.02,0.02,0.02,
+    0.97,0.02,0.02,0.02, 0.97,0.02,0.02,0.02 ] },
+  // The hi-hat is ONE instrument with two states, not two voices. On a real
+  // hat the open ring is cut off by the next closed hit - they physically
+  // cannot sound at once. Modelled as separate voices they could fire on the
+  // same step, which is impossible, so open/closed is decided per hit here.
+  //   openProfile  chance a skeleton hit opens, weighted to the 'and' of 4
+  //                (the classic lift into the downbeat) and the 'and' of 2
+  //   openInclude  chance this seed uses open hats at all - some minimal
+  //                techno is deliberately all-closed and very tight
+  { name: 'hat',  note: 42, include: 1.00, ghost: 1.00, drift: 1.00,
+    openNote: 46, openInclude: 0.75,
+    openProfile: [
+    0,0,0.02,0, 0,0,0.10,0,
+    0,0,0.02,0, 0,0,0.45,0.05 ],
+    profile: [
+    0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20,
+    0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20 ] },
+  { name: 'clap', note: 39, include: 0.95, ghost: 0.40, drift: 0.40, profile: [
+    0.03,0.03,0.03,0.03, 0.85,0.03,0.03,0.03,
+    0.03,0.03,0.03,0.03, 0.85,0.03,0.03,0.05 ] },
+  { name: 'rim',  note: 37, include: 0.85, ghost: 1.00, drift: 1.00, profile: [
+    0.02,0.10,0.02,0.10, 0.02,0.10,0.02,0.10,
+    0.02,0.10,0.02,0.10, 0.02,0.10,0.02,0.10 ] },
+
+  // ---- optional: capped at MAX_OPTIONAL, so a kit stays minimal ----
+
+  // snare: layered under the clap on the backbeat for a bigger hit. Slightly
+  // below the clap's own probability so it does not just double it every time.
+  { name: 'snare', notes: [38, 41, 43], optional: true, include: 0.35, ghost: 0.30, drift: 0.30, profile: [
+    0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.02,
+    0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.04 ] },
+
+  // ride: described in the reference as the layer that takes the percussion to
+  // its peak, so it is gated to high energy and arrives as the track builds.
+  // On and off the beat, with the off-beats accented - that velocity contrast
+  // is specifically what makes a techno ride sound right rather than flat.
+  { name: 'ride', notes: [50, 51], optional: true, include: 0.45, ghost: 0.60, drift: 0.50,
+    minEnergy: 65,
+    accent: [0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1],
+    profile: [
+    0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04,
+    0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04 ] },
+
+  // low tom: off-beat low end, per the reference. Sparse and mid-energy up.
+  { name: 'lowtom', note: 44, optional: true, include: 0.30, ghost: 0.50, drift: 0.80,
+    minEnergy: 45, profile: [
+    0.02,0.02,0.12,0.02, 0.02,0.02,0.12,0.02,
+    0.02,0.02,0.12,0.02, 0.02,0.02,0.12,0.02 ] },
+
+  // mid tom: the reference uses a delayed mid tom at the end of the bar for
+  // groove, so this is weighted into the last few steps.
+  { name: 'midtom', notes: [45, 47], optional: true, include: 0.30, ghost: 0.50, drift: 0.80,
+    minEnergy: 55, profile: [
+    0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02,
+    0.02,0.02,0.02,0.06, 0.10,0.18,0.14,0.10 ] },
+
+  // crash: NOT a loop voice. It is the capital letter at the start of a musical
+  // sentence - the start of a 16-bar section - and above all the hit that lands
+  // when the kick returns from a drop. Handled by its own branch below.
+  { name: 'crash', notes: [48, 49], optional: true, include: 0.50, role: 'marker' },
+
+  // ---- bass (channel 2) - the first pitched voice ----
+  // dropsOut with the kick, which is what makes a key change work: the bass
+  // leaves during the breakdown and comes back in the new key.
+  // profile and avoid are filled in below, from the actual kick pattern.
+  // ghost 0 on purpose, and this should hold for every pitched voice. A ghost
+  // note is a drumming idea - a quiet grace hit between the main ones. On a
+  // bass it just adds a note, and because ghosts re-roll every bar it was
+  // changing the RHYTHM of the line 47 percent of bars while the pitches stayed
+  // locked to the section. That is internally inconsistent: a line whose notes
+  // are committed but whose rhythm jitters every bar is not a line. Velocity
+  // still varies per bar, so it breathes without wandering.
+  { name: 'bass', include: 1.00, ghost: 0, drift: 0.45, dropsOut: true,
+    pitched: true, clip: BASS_CLIP, chan: bassChan, profile: null },
+];
+
+// The bass must not land where the kick lands. Because kick drift is pinned at
+// 0, the kick pattern is a pure function of the seed and never changes, so the
+// bass can be built around the real kick rather than an assumed 0/4/8/12 - which
+// matters for the seeds that roll a fifth, syncopated kick.
+const KICK_STEPS = VOICES[0].profile.map((p, s) => rnd(0, s, 0) < p);
+const BASS_VOICE = VOICES[VOICES.length - 1];
+BASS_VOICE.avoid = KICK_STEPS;
+BASS_VOICE.profile = KICK_STEPS.map((isKick, s) =>
+  isKick ? 0 : (s % 4 === 2 ? BASS_OFFBEAT : BASS_SIXTEENTH * BASS_ROLL));
+
+// weighted pick, stable for a whole section so the bass line reads as a line
+// rather than re-rolling under you every bar
+function bassChoiceAt(vi, step, sec) {
+  const r = rnd(21, vi * 997 + step, sec);
+  let acc = 0;
+  for (const c of BASS_CHOICES) { acc += c.w; if (r < acc) return c; }
+  return BASS_CHOICES[0];
+}
+
+// A kit that contains everything is not minimal techno. Roll each optional
+// voice against its own include chance, then keep at most MAX_OPTIONAL of the
+// winners - the cap is the cage that keeps a seed restrained.
+const MAX_OPTIONAL = 3;
+const CRASH_AT_SECTION = 0.45;                    // chance of a crash on a plain section start
+const CRASH_VEL_LO = 0.80, CRASH_VEL_HI = 0.95;
+const OPEN_ACCENT = 1.10;                         // an open hat rings out, so it sits slightly proud
+
+const KIT = (() => {
+  const core = VOICES.filter(v => !v.optional && rnd(11, VOICES.indexOf(v), 0) < v.include);
+  const opts = VOICES.filter(v => v.optional)
+    .map(v => ({ v, r: rnd(12, VOICES.indexOf(v), 0) }))
+    .filter(o => o.r < o.v.include)
+    .sort((a, b) => a.r - b.r)          // deterministic, and favours the strongest rolls
+    .slice(0, MAX_OPTIONAL)
+    .map(o => o.v);
+  return core.concat(opts);
+})();
+
+// ---- the two layers, now on three clocks ----
+// ghost:    re-rolls every bar. Quiet, never touches the skeleton.
+// skeleton: holds for a whole section, then may mutate by ONE step.
+// original: never changes. The skeleton is tethered to it (see MAX_DRIFT).
+//
+// The skeleton is what makes the genre hypnotic, so it must not be re-rolled -
+// it mutates. A mutation re-rolls a single step against that voice's own
+// profile, so the profile stays the cage: a 0.97 kick step will almost always
+// come back on, a 0.02 step almost always stays off, and the movement happens
+// where the profile is genuinely undecided (the 0.10-0.20 steps). That is why
+// hats and rim evolve while the kick effectively cannot.
+const SECTION = 4;         // phrases a skeleton holds before it may change - 16 bars
+const DRIFT_CHANCE = 0.5;  // chance a section boundary mutates at all
+const MAX_DRIFT = 3;       // never more than 3 steps away from the original
+
+function voicePattern(v, vi) {
+  // redundant rack slots (three snares, two crashes, two rides) are a choice,
+  // not a layer - one is picked per seed and the others stay unused.
+  const nn = v.notes ? v.notes[Math.floor(rnd(15, vi, 0) * v.notes.length) % v.notes.length] : v.note;
+
+  // A marker is a structural one-shot, so it gets none of the skeleton, ghost
+  // or drift machinery. It fires on the downbeat when the kick returns from a
+  // drop - the strongest placement there is - and sometimes at a section start.
+  if (v.role === 'marker') {
+    const mgate = sig(t => {
+      if (Math.floor(t * STEPS) % STEPS !== 0) return false;
+      const bar = Math.floor(t);
+      if (bar % BARS_PER_PHRASE === 0) {
+        const ph = Math.floor(bar / BARS_PER_PHRASE);
+        if (ph > 0 && !phrase(ph).drop && phrase(ph - 1).drop) return true;
+      }
+      if (bar % (BARS_PER_PHRASE * SECTION) !== 0) return false;
+      // scaled by energy, so crashes cluster around peaks instead of firing at
+      // a flat rate. At a flat rate this landed one crash every ~50 seconds,
+      // which is far too busy for a genre named after its restraint.
+      return rnd(13, vi, bar) < CRASH_AT_SECTION * efrac(phrase(Math.floor(bar / BARS_PER_PHRASE)));
+    }).segment(STEPS);
+    const mvel = sig(t => CRASH_VEL_LO + rnd(14, vi, Math.floor(t)) * (CRASH_VEL_HI - CRASH_VEL_LO)).segment(STEPS);
+    return note(nn).struct(mgate).velocity(mvel);
+  }
+
+  // the seed's original skeleton - the identity this voice always stays near
+  const orig = v.profile.map((p, s) => rnd(0, vi * 997 + s, 0) < p);
+  const chain = [orig];
+
+  // Without MAX_DRIFT this would be an unbounded random walk through pattern
+  // space: over a few hours it would wander arbitrarily far from the seed and
+  // the kit would slowly stop being the kit you chose. Capping the distance
+  // from the original makes it breathe around its identity instead. Flips that
+  // move it back toward the original are always allowed, so it can recover.
+  function skelAt(sec) {
+    if (!(sec >= 0)) sec = 0;                 // also catches NaN
+    sec = Math.min(sec, chain.length + 4096); // bound any single extension
+    while (chain.length <= sec) {
+      const n = chain.length, prev = chain[n - 1];
+      let next = prev;
+      if (rnd(8, vi * 997, n) < DRIFT_CHANCE * v.drift) {
+        const step = Math.floor(rnd(9, vi * 997, n) * STEPS) % STEPS;
+        const val  = rnd(10, vi * 997 + step, n) < v.profile[step];
+        if (val !== prev[step]) {
+          const cand = prev.slice();
+          cand[step] = val;
+          let d = 0;
+          for (let i = 0; i < STEPS; i++) if (cand[i] !== orig[i]) d++;
+          if (d <= MAX_DRIFT) next = cand;
+        }
+      }
+      chain.push(next);
+    }
+    return chain[sec];
+  }
+
+  const secOf = bar => Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+
+  // ---- open/closed hi-hat state, for a voice that has two states ----
+  // Only skeleton hits can open; a ghost open hat would be a loud accent where
+  // a quiet tick belongs. rawOpen is the unconstrained roll; isOpen applies the
+  // choke spacing so a second open cannot land while the first is still ringing,
+  // which means the next hat hit is always a closed one cutting it off.
+  const useOpen = v.openNote ? rnd(17, vi, 0) < v.openInclude : false;
+  const rawOpen = (step, bar) => rnd(16, vi * 997 + step, bar) < v.openProfile[step];
+  function isOpen(step, bar) {
+    if (!useOpen || !rawOpen(step, bar)) return false;
+    for (let k = 1; k <= 3; k++) {
+      let s = step - k, b = bar;
+      if (s < 0) { s += STEPS; b -= 1; }
+      if (b >= 0 && rawOpen(s, b)) return false;   // still ringing - stay closed
+    }
+    return true;
+  }
+  const openAt = (step, bar) => v.openNote && skelAt(secOf(bar))[step] && isOpen(step, bar);
+
+  const gate = sig(t => {
+    const step = Math.floor(t * STEPS) % STEPS;
+    const bar  = Math.floor(t);
+    const st   = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (v.dropsOut && st.drop) return false;
+    // a peak-layer voice simply is not there yet at low energy
+    if (v.minEnergy && st.e < v.minEnergy) return false;
+    // blocks ghosts as well as skeleton hits, so the bass can never collide
+    // with the kick even on a step its profile already rules out
+    if (v.avoid && v.avoid[step]) return false;
+    if (skelAt(secOf(bar))[step]) return true;
+    const w = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
+    return rnd(1, vi * 997 + step, bar) < w * MAX_GHOST * v.ghost;
+  }).segment(STEPS);
+
+  const vel = sig(t => {
+    const step = Math.floor(t * STEPS) % STEPS;
+    const bar  = Math.floor(t);
+    if (skelAt(secOf(bar))[step]) {
+      // vel is an optional per-voice tightening of the skeleton range
+      const vlo  = v.vel ? v.vel[0] : SKEL_VEL_LO;
+      const vhi  = v.vel ? v.vel[1] : SKEL_VEL_HI;
+      const base = vlo + rnd(2, vi * 997 + step, bar) * (vhi - vlo);
+      const acc  = (v.accent ? v.accent[step] : 1) * (openAt(step, bar) ? OPEN_ACCENT : 1);
+      return Math.max(0, Math.min(1, base * acc));
+    }
+    const f  = efrac(phrase(Math.floor(bar / BARS_PER_PHRASE)));
+    const lo = GVEL_LO_A + f * (GVEL_LO_B - GVEL_LO_A);
+    const hi = GVEL_HI_A + f * (GVEL_HI_B - GVEL_HI_A);
+    return lo + rnd(3, vi * 997 + step, bar) * (hi - lo);
+  }).segment(STEPS);
+
+  // For a two-state voice the note itself is a signal, so one hit is either the
+  // closed note or the open one - never both, which is the whole point.
+  // A pitched voice reads its note from the key engine, so it transposes itself
+  // whenever the key moves - which only happens on a drop-return, exactly when
+  // this voice is silent and about to re-enter.
+  const noteSig = v.pitched
+    ? sig(t => {
+        const step = Math.floor(t * STEPS) % STEPS;
+        const bar  = Math.floor(t);
+        const sc   = scaleAtBar(bar);
+        const c    = bassChoiceAt(vi, step, secOf(bar));
+        return BASS_OCTAVE + sc.root + sc.steps[c.idx] + 12 * c.oct;
+      }).segment(STEPS)
+    : v.openNote
+      ? sig(t => openAt(Math.floor(t * STEPS) % STEPS, Math.floor(t)) ? v.openNote : nn).segment(STEPS)
+      : nn;
+
+  // struct takes its rhythm from the boolean gate and drops the false steps.
+  const out = note(noteSig).struct(gate).velocity(vel);
+  return v.clip ? out.clip(v.clip) : out;
+}
+
+// Swing is applied per channel but with identical settings, so drums and bass
+// groove together rather than drifting apart.
+const withSwing = p => SWING > 0 ? p.swingBy(SWING, SWING_GRID) : p;
+const patternsFor = pred =>
+  stack(...KIT.filter(pred).map(v => voicePattern(v, VOICES.indexOf(v))));
+
+stack(
+  withSwing(patternsFor(v => !v.pitched)).midichan(drumChan),
+  withSwing(patternsFor(v =>  v.pitched)).midichan(bassChan)
+).midi(midi)
