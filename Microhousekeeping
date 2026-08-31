@@ -1,13 +1,14 @@
 // ============================================================
 //  THE SHIP OF THESEUS - MICROHOUSE
 //  Everything you touch mid-set is in this block. Nothing below it.
+//  Ctrl+Enter to apply. Same SEED = seamless. Stop+Play = back to zero.
 // ============================================================
 
 const midi = 'IAC Driver Bus 1';   // your MIDI port
 
 // -- the four you will actually reach for --------------------
-const SEED          = 420;    // track change. New kit, new patterns, new drops.
-const OPEN_KEY      = '12m'; // key, as your DJ software shows it. 1m = A minor.
+const SEED          = 1;    // track change. New kit, new patterns, new drops.
+const OPEN_KEY      = '1m'; // key, as your DJ software shows it. 1m = A minor.
 const DROP_PATIENCE = 15;   // breakdowns: -20 every ~2 min, 15 every ~4, 30 every ~6
 const MAX_OPTIONAL  = 3;    // kit size on top of the core. 1 = very stripped.
 
@@ -15,6 +16,11 @@ const MAX_OPTIONAL  = 3;    // kit size on top of the core. 1 = very stripped.
 // Microhouse runs 123-127 BPM with 55-60% swing. Set the tempo in Strudel/Ableton.
 const SWING_PCT  = 58;  // sources put this genre at 55-60. Unlike Chicago house, it IS swung.
 const SWING_GRID = 8;
+
+// -- new song -------------------------------------------------
+// After this many breakdowns the set turns over: energy resets, every voice
+// gets a new pattern, the kit is re-rolled and the key jumps. 0 = never.
+const SONG_DROPS = 7;
 
 // -- space ----------------------------------------------------
 const SPARSE = 1.0;     // how much voices sit out. 0 = nobody rests, 2 = twice as often.
@@ -66,14 +72,14 @@ const DROP_MAX_CHANCE = 0.18;
 const DROP_COOLDOWN = 4;
 const RELEASE_LO = 0.3, RELEASE_HI = 0.6;
 
-const _walk = [{ e: E_START, drop: false, cool: 0, left: 0 }];
+const _walk = [{ e: E_START, drop: false, cool: 0, left: 0, song: 0, since: 0 }];
 function phrase(i) {
   if (!(i >= 0)) i = 0;
   i = Math.min(i, _walk.length + 4096);
   while (_walk.length <= i) {
     const n = _walk.length, p = _walk[n - 1];
     let e = Math.min(E_MAX, p.e + CLIMB_LO + rnd(4, n, 0) * (CLIMB_HI - CLIMB_LO));
-    let drop = false, cool = p.cool, left = p.left;
+    let drop = false, cool = p.cool, left = p.left, song = p.song, since = p.since;
     if (left > 0) {
       drop = true; left -= 1;
     } else if (cool > 0) {
@@ -85,12 +91,15 @@ function phrase(i) {
         left = rnd(6, n, 0) < 0.3 ? 1 : 0;
         e = e * (1 - (RELEASE_LO + rnd(7, n, 0) * (RELEASE_HI - RELEASE_LO)));
         cool = DROP_COOLDOWN;
+        since += 1;
+        if (SONG_DROPS > 0 && since >= SONG_DROPS) { song += 1; since = 0; e = E_START; }
       }
     }
-    _walk.push({ e, drop, cool, left });
+    _walk.push({ e, drop, cool, left, song, since });
   }
   return _walk[i];
 }
+const songAtBar = bar => phrase(Math.floor(bar / BARS_PER_PHRASE)).song;
 const efrac = st => Math.max(0, Math.min(1, (st.e - E_START) / (E_MAX - E_START)));
 
 
@@ -119,21 +128,35 @@ function wheelDist(a, b) {
   return Math.min(d, 12 - d);
 }
 
-const KEY_ORIGIN = parseOpenKey(OPEN_KEY);
-const _keys = [KEY_ORIGIN];
+const KEY_TYPED = parseOpenKey(OPEN_KEY);
+const NEW_SONG_KEY_DRIFT = 3;
+const _origins = {};
+function keyOriginFor(song) {
+  if (_origins[song]) return _origins[song];
+  if (song === 0) { _origins[0] = KEY_TYPED; return KEY_TYPED; }
+  const off = Math.floor(rnd(24, song, 0) * (NEW_SONG_KEY_DRIFT * 2 + 1)) - NEW_SONG_KEY_DRIFT;
+  const num = ((KEY_TYPED.num - 1 + off + 12) % 12) + 1;
+  const mode = rnd(25, song, 0) < 0.30 ? (KEY_TYPED.mode === 'm' ? 'd' : 'm') : KEY_TYPED.mode;
+  _origins[song] = { num, mode };
+  return _origins[song];
+}
+const KEY_ORIGIN = KEY_TYPED;
+const _keys = [KEY_TYPED];
 function keyAtPhrase(ph) {
   if (!(ph >= 0)) ph = 0;
   ph = Math.min(ph, _keys.length + 4096);
   while (_keys.length <= ph) {
     const n = _keys.length, prev = _keys[n - 1];
+    const home = keyOriginFor(phrase(n).song);
     let next = prev;
+    if (phrase(n).song !== phrase(n - 1).song) { _keys.push(home); continue; }
     if (n > 0 && !phrase(n).drop && phrase(n - 1).drop && rnd(18, n, 0) < KEY_MOVE_CHANCE) {
       if (rnd(19, n, 0) < KEY_RELATIVE_ODDS) {
         next = { num: prev.num, mode: prev.mode === 'm' ? 'd' : 'm' };
       } else {
         const dir = rnd(20, n, 0) < 0.5 ? -1 : 1;
         const num = ((prev.num - 1 + dir + 12) % 12) + 1;
-        if (wheelDist(num, KEY_ORIGIN.num) <= MAX_KEY_DRIFT) next = { num, mode: prev.mode };
+        if (wheelDist(num, home.num) <= MAX_KEY_DRIFT) next = { num, mode: prev.mode };
       }
     }
     _keys.push(next);
@@ -180,7 +203,7 @@ const PICKUP_ELSE  = 0.72;
 const PICKUP_VEL   = 1.12;
 
 const VOICES = [
-  { name: 'kick', note: 36, include: 1.00, ghost: 0.25, drift: 0, dropsOut: true,
+  { name: 'kick', note: 36, songStable: true, include: 1.00, ghost: 0.25, drift: 0, dropsOut: true,
     vel: [0.88, 0.96],
     accent: [1.00,1,1,1, 0.95,1,1,1, 0.975,1,1,1, 0.95,1,1,1],
     profile: [
@@ -247,16 +270,25 @@ const CRASH_AT_SECTION = 0.45;
 const CRASH_VEL_LO = 0.80, CRASH_VEL_HI = 0.95;
 const OPEN_ACCENT = 1.10;
 
-const KIT = (() => {
-  const core = VOICES.filter(v => !v.optional && rnd(11, VOICES.indexOf(v), 0) < v.include);
+// Kit membership is now per song, so a new song is genuinely a new kit. Every
+// voice stays in the stack and is gated instead, the same way rest and
+// minEnergy gate - so nothing has to be rebuilt when the song turns over.
+const _kits = {};
+function kitFor(song) {
+  if (_kits[song]) return _kits[song];
+  const core = VOICES.filter(v => !v.optional && rnd(11, VOICES.indexOf(v), song) < v.include);
   const opts = VOICES.filter(v => v.optional)
-    .map(v => ({ v, r: rnd(12, VOICES.indexOf(v), 0) }))
+    .map(v => ({ v, r: rnd(12, VOICES.indexOf(v), song) }))
     .filter(o => o.r < o.v.include)
     .sort((a, b) => a.r - b.r)
     .slice(0, MAX_OPTIONAL)
     .map(o => o.v);
-  return core.concat(opts);
-})();
+  const names = {};
+  core.concat(opts).forEach(v => { names[v.name] = true; });
+  _kits[song] = names;
+  return names;
+}
+const KIT = VOICES;
 
 const SECTION = 4;
 const DRIFT_CHANCE = 0.5;
@@ -269,6 +301,7 @@ function voicePattern(v, vi) {
     const mgate = sig(t => {
       if (Math.floor(t * STEPS) % STEPS !== 0) return false;
       const bar = Math.floor(t);
+      if (!kitFor(songAtBar(bar))[v.name]) return false;
       if (bar % BARS_PER_PHRASE === 0) {
         const ph = Math.floor(bar / BARS_PER_PHRASE);
         if (ph > 0 && !phrase(ph).drop && phrase(ph - 1).drop) return true;
@@ -288,29 +321,43 @@ function voicePattern(v, vi) {
   const len = v.profile.length;
   const maxDrift = Math.max(1, Math.min(MAX_DRIFT, Math.floor(len / 3)));
 
-  const orig = v.profile.map((p, s) => rnd(0, vi * 997 + s, 0) < p);
+  // The kick keeps one skeleton across every song - it is the grid, and the
+  // bass avoid list is derived from it once at load. Everything else gets a
+  // fresh pattern when the song turns over.
+  const songOf = song => v.songStable ? 0 : song;
+  const _origs = {};
+  function origFor(song) {
+    const k = songOf(song);
+    if (_origs[k]) return _origs[k];
+    const o = v.profile.map((p, s) => rnd(0, vi * 997 + s, k) < p);
 
   // Guaranteed at least one hit, for every voice now rather than only the
   // ghost-less ones. A 3-step profile rolls all-misses far more often than a
   // 16-step one, and a polyrhythmic voice with an empty skeleton is just random
   // ghosts - it loses the phasing that is the whole point of it.
-  if (!orig.some(Boolean)) {
-    const peak = Math.max.apply(null, v.profile);
-    const strong = [];
-    v.profile.forEach((p, s) => { if (p >= peak / 2) strong.push(s); });
-    orig[strong[Math.floor(rnd(22, vi, 0) * strong.length) % strong.length]] = true;
+    if (!o.some(Boolean)) {
+      const peak = Math.max.apply(null, v.profile);
+      const strong = [];
+      v.profile.forEach((p, s2) => { if (p >= peak / 2) strong.push(s2); });
+      o[strong[Math.floor(rnd(22, vi, k) * strong.length) % strong.length]] = true;
+    }
+    _origs[k] = o;
+    return o;
   }
-  const chain = [orig];
 
-  function skelAt(sec) {
+  const _chains = {};
+  function skelAt(sec, song) {
+    const k = songOf(song);
+    const orig = origFor(song);
+    const chain = _chains[k] || (_chains[k] = [orig]);
     if (!(sec >= 0)) sec = 0;
     sec = Math.min(sec, chain.length + 4096);
     while (chain.length <= sec) {
       const n = chain.length, prev = chain[n - 1];
       let next = prev;
-      if (rnd(8, vi * 997, n) < DRIFT_CHANCE * v.drift) {
-        const step = Math.floor(rnd(9, vi * 997, n) * len) % len;
-        const val  = rnd(10, vi * 997 + step, n) < v.profile[step];
+      if (rnd(8, vi * 997 + k, n) < DRIFT_CHANCE * v.drift) {
+        const step = Math.floor(rnd(9, vi * 997 + k, n) * len) % len;
+        const val  = rnd(10, vi * 997 + step + k, n) < v.profile[step];
         if (val !== prev[step]) {
           const cand = prev.slice();
           cand[step] = val;
@@ -337,7 +384,7 @@ function voicePattern(v, vi) {
     const phraseInSection = Math.floor(bar / BARS_PER_PHRASE) % SECTION;
     return phraseInSection === SECTION - 1 ? SECTION_LIFT : PHRASE_LIFT;
   }
-  const isPickup = (step, bar) => skelAt(secOf(bar))[(idxAt(step, bar) + 1) % len];
+  const isPickup = (step, bar) => skelAt(secOf(bar), songAtBar(bar))[(idxAt(step, bar) + 1) % len];
 
   const voiceFloor = (v.vel ? v.vel[0] : SKEL_VEL_LO) *
                      (v.accent ? Math.min.apply(null, v.accent) : 1);
@@ -354,7 +401,7 @@ function voicePattern(v, vi) {
     }
     return true;
   }
-  const openAt = (step, bar) => v.openNote && skelAt(secOf(bar))[idxAt(step, bar)] && isOpen(step, bar);
+  const openAt = (step, bar) => v.openNote && skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)] && isOpen(step, bar);
 
   const gate = sig(t => {
     const step = Math.floor(t * STEPS) % STEPS;
@@ -364,7 +411,8 @@ function voicePattern(v, vi) {
     if (v.minEnergy !== undefined && st.e < v.minEnergy) return false;
     if (v.avoid && v.avoid[step]) return false;
     if (restsAt(bar)) return false;
-    if (skelAt(secOf(bar))[idxAt(step, bar)]) return true;
+    if (!kitFor(songAtBar(bar))[v.name]) return false;
+    if (skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)]) return true;
     const w = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
     const shaped = w * MAX_GHOST * v.ghost * lift(bar) *
                    (isPickup(step, bar) ? PICKUP_BIAS : PICKUP_ELSE);
@@ -374,7 +422,7 @@ function voicePattern(v, vi) {
   const vel = sig(t => {
     const step = Math.floor(t * STEPS) % STEPS;
     const bar  = Math.floor(t);
-    if (skelAt(secOf(bar))[idxAt(step, bar)]) {
+    if (skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)]) {
       const vlo  = v.vel ? v.vel[0] : SKEL_VEL_LO;
       const vhi  = v.vel ? v.vel[1] : SKEL_VEL_HI;
       const acc = (v.accent ? v.accent[step] : 1) * (openAt(step, bar) ? OPEN_ACCENT : 1);
