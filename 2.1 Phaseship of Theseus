@@ -25,6 +25,9 @@ const SWING_GRID = 8;   // 8 = shuffles the ghosts. 4 = shuffles the hats, much 
 const BASS_ROLL = 0.5;  // 0 = sparse offbeats, 1 = rolling 16ths
 const BASS_CLIP = 0.55; // note length. Shorter leaves more room for the kick.
 
+// -- space ----------------------------------------------------
+const SPARSE = 1.0;     // how much voices sit out. 0 = nobody rests, 2 = twice as often.
+
 // -- motif (channel 5) ----------------------------------------
 // A 2-bar phrase with an arch shape and one climax, repeated verbatim then
 // with its ending altered. Sits well above the chords so they never collide.
@@ -294,44 +297,44 @@ const VOICES = [
     profile: [
     0.97,0.02,0.02,0.02, 0.97,0.02,0.02,0.02,
     0.97,0.02,0.02,0.02, 0.97,0.02,0.02,0.02 ] },
-  { name: 'hat',  note: 42, include: 1.00, ghost: 1.00, drift: 1.00,
+  { name: 'hat',  note: 42, rest: 0.10, include: 1.00, ghost: 1.00, drift: 1.00,
     openNote: 46, openInclude: 0.75,
     openProfile: [0,0,0.02,0, 0,0,0.10,0, 0,0,0.02,0, 0,0,0.45,0.05],
     profile: [
     0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20,
     0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20 ] },
-  { name: 'clap', note: 39, include: 0.95, ghost: 0.40, drift: 0.40, profile: [
+  { name: 'clap', note: 39, rest: 0.25, include: 0.95, ghost: 0.40, drift: 0.40, profile: [
     0.03,0.03,0.03,0.03, 0.85,0.03,0.03,0.03,
     0.03,0.03,0.03,0.03, 0.85,0.03,0.03,0.05 ] },
-  { name: 'rim',  note: 37, include: 0.90, ghost: 0.30, drift: 1.00,
+  { name: 'rim',  note: 37, rest: 0.30, include: 0.90, ghost: 0.30, drift: 1.00,
     profile: [0.50, 0.08, 0.18] },
 
-  { name: 'snare', notes: [38, 41, 43], optional: true, include: 0.35, ghost: 0.30, drift: 0.30, profile: [
+  { name: 'snare', notes: [38, 41, 43], optional: true, rest: 0.30, include: 0.35, ghost: 0.30, drift: 0.30, profile: [
     0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.02,
     0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.04 ] },
 
-  { name: 'ride', notes: [50, 51], optional: true, include: 0.45, ghost: 0.60, drift: 0.50,
+  { name: 'ride', notes: [50, 51], optional: true, rest: 0.30, include: 0.45, ghost: 0.60, drift: 0.50,
     minEnergy: 65,
     accent: [0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1],
     profile: [
     0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04,
     0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04 ] },
 
-  { name: 'lowtom', note: 44, optional: true, include: 0.45, ghost: 0.25, drift: 0.80,
+  { name: 'lowtom', note: 44, optional: true, rest: 0.35, include: 0.45, ghost: 0.25, drift: 0.80,
     minEnergy: 35, profile: [0.38, 0.06, 0.06, 0.18, 0.06] },
 
-  { name: 'midtom', notes: [45, 47], optional: true, include: 0.40, ghost: 0.25, drift: 0.80,
+  { name: 'midtom', notes: [45, 47], optional: true, rest: 0.35, include: 0.40, ghost: 0.25, drift: 0.80,
     minEnergy: 45, profile: [0.34, 0.05, 0.12, 0.05, 0.18, 0.05, 0.09] },
 
   { name: 'crash', notes: [48, 49], optional: true, include: 0.50, role: 'marker' },
 
-  { name: 'bass', include: 1.00, ghost: 0, drift: 0.45, dropsOut: true,
+  { name: 'bass', rest: 0.12, include: 1.00, ghost: 0, drift: 0.45, dropsOut: true,
     pitched: true, clip: BASS_CLIP, chan: bassChan, profile: null },
 
-  { name: 'motif', include: 1.00, role: 'motif', chan: motifChan,
+  { name: 'motif', rest: 0.30, include: 1.00, role: 'motif', chan: motifChan,
     clip: MOTIF_CLIP, vel: [0.66, 0.86] },
 
-  { name: 'stab', include: 1.00, ghost: 0, drift: 0.20,
+  { name: 'stab', rest: 0.20, include: 1.00, ghost: 0, drift: 0.20,
     pitched: true, chordTones: [0, 2, 4], clip: STAB_CLIP, chan: stabChan,
     vel: [0.62, 0.82], profile: [
     0.02,0.02,0.35,0.04, 0.02,0.02,0.30,0.04,
@@ -489,6 +492,10 @@ function voicePattern(v, vi) {
 
   const secOf = bar => Math.floor(bar / (BARS_PER_PHRASE * SECTION));
   const idxAt = (step, bar) => (bar * STEPS + step) % len;
+  // a voice sits out a whole 16-bar section. Different from a drop, which is
+  // kick+bass leaving together at high energy. This is one voice, any energy.
+  const restChance = Math.max(0, Math.min(0.75, (v.rest || 0) * SPARSE));
+  const restsAt = bar => restChance > 0 && rnd(23, vi, secOf(bar)) < restChance;
 
   function lift(bar) {
     if (bar % BARS_PER_PHRASE !== BARS_PER_PHRASE - 1) return 1;
@@ -522,6 +529,7 @@ function voicePattern(v, vi) {
     if (v.minEnergy !== undefined && st.e < v.minEnergy) return false;
     if (v.avoid && v.avoid[step]) return false;
     if (!kitFor(songAtBar(bar))[v.name]) return false;
+    if (restsAt(bar)) return false;
     if (skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)]) return true;
     const w = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
     const shaped = w * MAX_GHOST * v.ghost * lift(bar) *
