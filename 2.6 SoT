@@ -1,0 +1,825 @@
+// ============================================================
+//  THE SHIP OF THESEUS - PHASE 2.6 bpm ramp
+//  Everything you touch mid-set is in this block. Nothing below it.
+//  Ctrl+Enter to apply. Same SEED = seamless. Stop+Play = back to zero.
+// ============================================================
+
+const midi = 'IAC Driver Bus 1';   // your MIDI port
+
+// -- the four you will actually reach for --------------------
+const SEED          = 23;    // track change. New kit, new patterns, new drops.
+const OPEN_KEY      = '4m'; // key, as your DJ software shows it. 1m = A minor.
+const DROP_PATIENCE = 15;   // breakdowns: -20 every ~2 min, 15 every ~4, 30 every ~6
+const MAX_OPTIONAL  = 3;    // kit size on top of the core. 1 = very stripped.
+
+// -- tempo --------------------------------------------------------
+// Typical ranges by genre, for reference:
+//   techno    125-135   minimal   120-125   psy    138-148
+//   house     120-125   trance    132-140
+//   dubtechno 115-125
+//   dubstep   138-142 (written half-time, so it reads as ~69-71)
+//   dnb       168-176 (commonly 174)
+//   reggae    70-90   (roots tempo - dub versions usually match the riddim)
+// (acid isn't a MODE yet - it needs a filter-cutoff CC sweep, not just a
+// preset. Ask and it'll get added the same way DELAYFB_CC below was.)
+const BPM = 120;
+// Glide to a new BPM over this many seconds instead of snapping on the next
+// Ctrl+Enter. 0 = old behavior, instant change. State lives on globalThis
+// because this whole script re-runs from scratch on every Ctrl+Enter - a
+// plain top-level variable would forget what BPM you were actually at.
+const BPM_RAMP_SECONDS = 8;
+
+if (typeof setcpm !== 'undefined') {
+  const _tempo = (globalThis.__sotTempo = globalThis.__sotTempo || { bpm: undefined, timer: null });
+  if (_tempo.timer) { clearInterval(_tempo.timer); _tempo.timer = null; }
+  if (_tempo.bpm === undefined || BPM_RAMP_SECONDS <= 0 || _tempo.bpm === BPM) {
+    _tempo.bpm = BPM;
+    setcpm(BPM / 4);
+  } else {
+    const fromBpm = _tempo.bpm, toBpm = BPM, stepMs = 100;
+    const steps = Math.max(1, Math.round(BPM_RAMP_SECONDS * 1000 / stepMs));
+    let step = 0;
+    _tempo.timer = setInterval(() => {
+      step += 1;
+      const t = Math.min(1, step / steps);
+      _tempo.bpm = fromBpm + (toBpm - fromBpm) * t;
+      setcpm(_tempo.bpm / 4);
+      if (t >= 1) { clearInterval(_tempo.timer); _tempo.timer = null; }
+    }, stepMs);
+  }
+}
+
+// -- mode -------------------------------------------------------
+// Bundles kick/clap pattern, scale flavor, hats, swing, bass and motif
+// phrasing into one genre switch. Pick a name, or 'custom' to hand-tune
+// every field yourself in MODE_PRESETS.custom below.
+//   techno  = the original sound - 4x4 kick, natural minor, rolling bass
+//   minimal = sparser kit, offbeat bass, subtler swing, more space
+//   psy     = harmonic minor, rolling hats, straight swing, short plucky bass
+//   dubstep = half-time kick+clap skeleton, sparse offbeat bass
+//   dnb     = classic two-step skeleton (kick 1 + "&3", snare on 3), busy hats
+//   house   = 4x4 kick, offbeat bass, moderate swing - the classic pump
+//   trance  = 4x4 kick, rolling bass, fuller arrangement, clean 4-bar riff
+//             loop (try OPEN_KEY in major/'d' mode for the classic uplifting
+//             sound - e.g. '8d' instead of '8m')
+//   dubtechno = sparse kick, no clap, sparse sub, lots of rest - lean on
+//             DELAYFB_* below (already built for chords through a delay) and
+//             turn MAX_OPTIONAL down to 1 for a properly stripped kit
+//   reggae  = one-drop skeleton (nothing on beat 1, kick+snare together on
+//             beat 3). Read this one honestly: this engine's whole DNA is a
+//             4/4 build/drop arc with a root-fifth-octave bass, and reggae is
+//             neither - no rave arc, and the bass is a real melodic hook this
+//             engine can't compose. What you get is the correct drum
+//             skeleton at a laid-back swing, nothing more. Fine as a texture,
+//             not a substitute for the genre.
+const MODE = 'dubtechno';
+
+// Nudge ONE field away from the chosen mode's preset without switching modes
+// or going full custom - e.g. MODE_OVERRIDES = { kickPattern: 'triplet' }.
+// Field names match the keys in MODE_PRESETS below. Leave {} to use the
+// mode's preset untouched.
+const MODE_OVERRIDES = {};
+
+const MODE_PRESETS = {
+  techno:  { kickPattern: '4x4',     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 0, swingPct: 56, swingGrid: 8, bassPattern: 'roll16',     bassClip: 1,   sparse: 1,   motifCycle: 3 },
+  minimal: { kickPattern: '4x4',     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 0, swingPct: 52, swingGrid: 8, bassPattern: 'offbeat',    bassClip: 0.6, sparse: 1.6, motifCycle: 2 },
+  psy:     { kickPattern: '4x4',     clapPattern: 'backbeat', scaleMode: 'harmonic', hatRoll: 1, swingPct: 50, swingGrid: 8, bassPattern: 'roll16',     bassClip: 0.4, sparse: 0.6, motifCycle: 2 },
+  dubstep: { kickPattern: 'dubstep', clapPattern: 'halftime', scaleMode: 'natural',  hatRoll: 0, swingPct: 50, swingGrid: 8, bassPattern: 'offbeat',    bassClip: 1,   sparse: 1.3, motifCycle: 3 },
+  dnb:     { kickPattern: 'twostep', clapPattern: 'halftime', scaleMode: 'natural',  hatRoll: 1, swingPct: 54, swingGrid: 8, bassPattern: 'offbeat',    bassClip: 1,   sparse: 0.8, motifCycle: 2 },
+  house:   { kickPattern: '4x4',     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 0, swingPct: 54, swingGrid: 8, bassPattern: 'offbeat',    bassClip: 0.8, sparse: 1,   motifCycle: 3 },
+  trance:  { kickPattern: '4x4',     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 0, swingPct: 50, swingGrid: 8, bassPattern: 'roll16',     bassClip: 1,   sparse: 0.8, motifCycle: 4 },
+  dubtechno: { kickPattern: '4x4',   clapPattern: 'none',     scaleMode: 'natural',  hatRoll: 0, swingPct: 52, swingGrid: 8, bassPattern: 'offbeat',    bassClip: 1,   sparse: 1.8, motifCycle: 2 },
+  reggae:  { kickPattern: 'onedrop', clapPattern: 'onedrop',  scaleMode: 'natural',  hatRoll: 0, swingPct: 58, swingGrid: 8, bassPattern: 'offbeat',    bassClip: 1,   sparse: 1.4, motifCycle: 2 },
+  // your own scratchpad - MODE = 'custom' uses this untouched
+  custom:  { kickPattern: '4x4',     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 0, swingPct: 56, swingGrid: 8, bassPattern: 'roll16',     bassClip: 1,   sparse: 1,   motifCycle: 3 },
+};
+
+const _preset = { ...(MODE_PRESETS[MODE] || MODE_PRESETS.techno), ...MODE_OVERRIDES };
+const KICK_PATTERN = _preset.kickPattern;   // see KICK_PATTERNS below for the full list
+const CLAP_PATTERN = _preset.clapPattern;   // see CLAP_PATTERNS below
+const SCALE_MODE   = _preset.scaleMode;     // 'natural' or 'harmonic' (raised 7th, Goa flavor)
+const HAT_ROLL     = _preset.hatRoll;       // 0 = accented pattern, 1 = dense rolling 16ths
+const SWING_PCT    = _preset.swingPct;      // 50 = straight, 62 = heavy
+const SWING_GRID   = _preset.swingGrid;     // 8 = shuffles the ghosts, 4 = shuffles the hats
+const BASS_PATTERN = _preset.bassPattern;   // see BASS_PATTERNS below - a rhythmic shape, not a density dial
+const BASS_CLIP    = _preset.bassClip;      // note length, shorter = more room for the kick
+const SPARSE       = _preset.sparse;        // how much voices sit out. 0 = nobody rests
+// MOTIF_CYCLE: the motif is 2 bars long but restates every MOTIF_CYCLE bars.
+// At 3 it does not divide into the 4-bar phrase or the 16-bar section, so the
+// hook lands in a different place each time and only comes home every 48
+// bars - the rest bar between statements is where the silence lives. 2 = no
+// phasing, a plain repeating loop (more hypnotic, less techno-phasing).
+const MOTIF_CYCLE  = _preset.motifCycle;
+
+// -- new song -------------------------------------------------
+// After this many breakdowns the set turns over: energy resets, every voice
+// gets a new pattern, the kit is re-rolled and the key jumps. 0 = never.
+const SONG_DROPS = 7;
+
+// -- motif (channel 5) ----------------------------------------
+// A 2-bar phrase with an arch shape and one climax, repeated verbatim then
+// with its ending altered. Sits well above the chords so they never collide.
+const MOTIF_OCTAVE = 60;
+const MOTIF_CLIP   = 0.85;
+const MOTIF_ON     = 1;   // 0 turns the lead off entirely
+
+// -- chord ----------------------------------------------------
+const STAB_OCTAVE = 60; // lower = darker. Keep above 59 or it fights the bass.
+const STAB_CLIP   = 0.90;
+const STAB_ON     = 1;   // 0 turns the chords off entirely
+
+// -- delay feedback CC (stabs) ---------------------------------
+// Wanders CC101 on the stab channel once per bar, for an external delay's
+// feedback knob. Values are 0-1 (CCV convention); floor/ceiling keep it off
+// the rails, step is the max jump per bar. The step size itself breathes
+// with the energy walk: tight and slow while building, a wider throw while
+// the breakdown is out - the classic "delay opens up into the drop" move,
+// driven by the same phrase()/efrac() state everything else reacts to.
+const DELAYFB_CCN  = 101;
+const DELAYFB_LO   = 0.2;
+const DELAYFB_HI   = .8;
+const DELAYFB_STEP = 0.05;
+
+// ============================================================
+//  Below here is the engine. You should not need to touch it.
+// ============================================================
+
+const drumChan = 1, bassChan = 2, stabChan = 3, motifChan = 5;
+const BASS_OCTAVE = 36;
+const BASS_OFFBEAT  = 0.85;
+const BASS_SIXTEENTH = 0.55;
+const BASS_CHOICES = [
+  { idx: 0, oct: 0, w: 0.76 },
+  { idx: 0, oct: 1, w: 0.10 },
+  { idx: 4, oct: 0, w: 0.08 },
+  { idx: 2, oct: 0, w: 0.06 },
+];
+const E_START = 30;
+const SWING = (SWING_PCT - 50) / 50;
+
+const STEPS = 16;
+const BARS_PER_PHRASE = 4;
+
+const sig = (typeof signal !== 'undefined') ? signal : (f) => time.fmap(f);
+
+function rnd(kind, a, b) {
+  let h = (kind * 374761393 + a * 668265263 + b * 2246822519 + SEED * 3266489917) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = Math.imul(h ^ (h >>> 16), 2246822507);
+  h = h ^ (h >>> 15);
+  return (h >>> 0) / 4294967296;
+}
+
+const E_MAX = 100;
+const CLIMB_LO = 0.5, CLIMB_HI = 2.0;
+const DROP_PATIENCE_SAFE = Math.max(-35, Math.min(45, DROP_PATIENCE));
+const DROP_LO = 40 + DROP_PATIENCE_SAFE;
+const DROP_HI = Math.max(DROP_LO + 5, Math.min(100, 90 + DROP_PATIENCE_SAFE));
+const DROP_MAX_CHANCE = 0.18;
+const DROP_COOLDOWN = 4;
+const RELEASE_LO = 0.3, RELEASE_HI = 0.6;
+
+const _walk = [{ e: E_START, drop: false, cool: 0, left: 0, song: 0, since: 0 }];
+function phrase(i) {
+  if (!(i >= 0)) i = 0;
+  i = Math.min(i, _walk.length + 4096);
+  while (_walk.length <= i) {
+    const n = _walk.length, p = _walk[n - 1];
+    let e = Math.min(E_MAX, p.e + CLIMB_LO + rnd(4, n, 0) * (CLIMB_HI - CLIMB_LO));
+    let drop = false, cool = p.cool, left = p.left, song = p.song, since = p.since;
+    if (left > 0) {
+      drop = true; left -= 1;
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - DROP_LO) / (DROP_HI - DROP_LO)));
+      if (rnd(5, n, 0) < ramp * DROP_MAX_CHANCE) {
+        drop = true;
+        left = rnd(6, n, 0) < 0.3 ? 1 : 0;
+        e = e * (1 - (RELEASE_LO + rnd(7, n, 0) * (RELEASE_HI - RELEASE_LO)));
+        cool = DROP_COOLDOWN;
+        since += 1;
+        if (SONG_DROPS > 0 && since >= SONG_DROPS) { song += 1; since = 0; e = E_START; }
+      }
+    }
+    _walk.push({ e, drop, cool, left, song, since });
+  }
+  return _walk[i];
+}
+const songAtBar = bar => phrase(Math.floor(bar / BARS_PER_PHRASE)).song;
+const efrac = st => Math.max(0, Math.min(1, (st.e - E_START) / (E_MAX - E_START)));
+
+
+const KEY_MOVE_CHANCE = 0.10;
+const KEY_RELATIVE_ODDS = 0.25;
+const MAX_KEY_DRIFT = 2;
+
+const PITCH_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
+const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
+const HARMONIC_MINOR_SCALE = [0, 2, 3, 5, 7, 8, 11];
+
+function rootOf(num, mode) {
+  const base = (7 * (num - 1)) % 12;
+  return mode === 'm' ? (base + 9) % 12 : base;
+}
+function parseOpenKey(s) {
+  const m = String(s).trim().toLowerCase().match(/^(\d{1,2})([md])$/);
+  if (!m) return { num: 1, mode: 'm' };
+  return { num: Math.min(12, Math.max(1, +m[1])), mode: m[2] };
+}
+function keyName(k) {
+  return k.num + k.mode + ' (' + PITCH_NAMES[rootOf(k.num, k.mode)] + (k.mode === 'm' ? ' minor)' : ' major)');
+}
+function wheelDist(a, b) {
+  const d = Math.abs(a - b) % 12;
+  return Math.min(d, 12 - d);
+}
+
+const KEY_TYPED = parseOpenKey(OPEN_KEY);
+const NEW_SONG_KEY_DRIFT = 3;
+const _origins = {};
+function keyOriginFor(song) {
+  if (_origins[song]) return _origins[song];
+  if (song === 0) { _origins[0] = KEY_TYPED; return KEY_TYPED; }
+  const off = Math.floor(rnd(24, song, 0) * (NEW_SONG_KEY_DRIFT * 2 + 1)) - NEW_SONG_KEY_DRIFT;
+  const num = ((KEY_TYPED.num - 1 + off + 12) % 12) + 1;
+  const mode = rnd(25, song, 0) < 0.30 ? (KEY_TYPED.mode === 'm' ? 'd' : 'm') : KEY_TYPED.mode;
+  _origins[song] = { num, mode };
+  return _origins[song];
+}
+const KEY_ORIGIN = KEY_TYPED;
+const _keys = [KEY_TYPED];
+function keyAtPhrase(ph) {
+  if (!(ph >= 0)) ph = 0;
+  ph = Math.min(ph, _keys.length + 4096);
+  while (_keys.length <= ph) {
+    const n = _keys.length, prev = _keys[n - 1];
+    const home = keyOriginFor(phrase(n).song);
+    let next = prev;
+    if (phrase(n).song !== phrase(n - 1).song) { _keys.push(home); continue; }
+    if (n > 0 && !phrase(n).drop && phrase(n - 1).drop && rnd(18, n, 0) < KEY_MOVE_CHANCE) {
+      if (rnd(19, n, 0) < KEY_RELATIVE_ODDS) {
+        next = { num: prev.num, mode: prev.mode === 'm' ? 'd' : 'm' };
+      } else {
+        const dir = rnd(20, n, 0) < 0.5 ? -1 : 1;
+        const num = ((prev.num - 1 + dir + 12) % 12) + 1;
+        if (wheelDist(num, home.num) <= MAX_KEY_DRIFT) next = { num, mode: prev.mode };
+      }
+    }
+    _keys.push(next);
+  }
+  return _keys[ph];
+}
+function keyAtBar(bar) { return keyAtPhrase(Math.floor(bar / BARS_PER_PHRASE)); }
+function scaleAtBar(bar) {
+  const k = keyAtBar(bar);
+  const minorScale = SCALE_MODE === 'harmonic' ? HARMONIC_MINOR_SCALE : MINOR_SCALE;
+  return { root: rootOf(k.num, k.mode), steps: k.mode === 'm' ? minorScale : MAJOR_SCALE, key: k };
+}
+
+function logKeySchedule(phrases) {
+  // seconds/bar derived from the live BPM, not hardcoded - was fixed at
+  // 1.92 (i.e. baked-in 125 BPM), which silently drifted the printed
+  // minute-marks for any other BPM (e.g. ~39% off at DnB's 174).
+  const secsPerPhrase = BARS_PER_PHRASE * (240 / BPM);
+  const out = ['key ' + keyName(KEY_ORIGIN) + ' - schedule for the next ' +
+               (phrases * secsPerPhrase / 60).toFixed(0) + ' min:'];
+  let prev = null;
+  for (let p = 0; p < phrases; p++) {
+    const k = keyAtPhrase(p);
+    if (!prev || k.num !== prev.num || k.mode !== prev.mode) {
+      const mins = p * secsPerPhrase / 60;
+      out.push('  ' + mins.toFixed(1) + ' min  ' + keyName(k) +
+               (prev ? '  (' + wheelDist(k.num, KEY_ORIGIN.num) + ' fifths from home)' : '  START'));
+      prev = k;
+    }
+  }
+  if (out.length === 1) out.push('  no key changes in this window - as intended');
+  console.log(out.join('\n'));
+}
+// Prints your key schedule to the browser console. Delete this line if you
+// do not want it.
+logKeySchedule(500);
+
+const SKEL_VEL_LO = 0.75, SKEL_VEL_HI = 0.95;
+const MAX_GHOST = 0.35;
+const WANDER_LO = 0.15, WANDER_HI = 0.85;
+const GVEL_LO_A = 0.30, GVEL_LO_B = 0.40;
+const GVEL_HI_A = 0.50, GVEL_HI_B = 0.65;
+
+const PHRASE_LIFT  = 1.35;
+const SECTION_LIFT = 1.80;
+const PICKUP_BIAS  = 1.70;
+const PICKUP_ELSE  = 0.72;
+const PICKUP_VEL   = 1.12;
+
+// ---- motif generator ----
+// Rules taken from melodic-techno practice and basic melodic theory:
+//   arch contour, exactly one climax placed past the midpoint and on a strong
+//   beat, first and last note are chord tones, mostly stepwise motion, and the
+//   whole thing stays inside the scale. Shape is decided FIRST, then filled in -
+//   generating note by note produced wobble rather than melody.
+const MOTIF_CHORD = [0, 2, 4];
+const MOTIF_POS = [0, 4, 6, 8, 12, 14, 16, 20, 22, 24, 28];
+const MOTIF_STRONG = [0, 8, 16, 24];
+const MOTIF_N_LO = 3, MOTIF_N_HI = 7;
+
+function motifSpread(total, moves, id, salt) {
+  const out = new Array(moves).fill(1);
+  let extra = total - moves;
+  for (let k = 0; extra > 0 && k < 50; k++) {
+    const i = Math.floor(rnd(40 + salt, id * 7 + k, 0) * moves);
+    if (out[i] < 3) { out[i]++; extra--; }
+  }
+  return out;
+}
+function motifChordTone(target, lo, hi) {
+  let best = null, bd = 99;
+  for (let o = -2; o <= 3; o++) for (const c of MOTIF_CHORD) {
+    const v = c + o * 7;
+    if (v < lo || v > hi) continue;
+    const d = Math.abs(v - target);
+    if (d < bd) { bd = d; best = v; }
+  }
+  return best === null ? target : best;
+}
+const _motifs = {};
+function motifFor(id) {
+  if (_motifs[id]) return _motifs[id];
+  const n = MOTIF_N_LO + Math.floor(rnd(30, id, 0) * (MOTIF_N_HI - MOTIF_N_LO + 1));
+  // peakIdx must sit past the midpoint (a real climax, not a halfway point) and
+  // leave at least one note to descend to the ending. That window is only ever
+  // 1-2 slots wide, so sample it directly and uniformly instead of rounding a
+  // jittered target - the old formula skewed ~75/25 toward one edge of the window.
+  const peakLo = Math.floor((n - 1) / 2) + 1;
+  const peakHi = n - 2;
+  const peakIdx = peakHi >= peakLo
+    ? peakLo + Math.floor(rnd(31, id, 0) * (peakHi - peakLo + 1))
+    : Math.max(1, peakHi);
+  const riseMoves = peakIdx, fallMoves = n - 1 - peakIdx;
+  const start = MOTIF_CHORD[Math.floor(rnd(32, id, 0) * MOTIF_CHORD.length)];
+  const rise = riseMoves + Math.floor(rnd(33, id, 0) * 3);
+  const peak = start + rise;
+  const endTarget = peak - (fallMoves + Math.floor(rnd(34, id, 0) * 3));
+  const end = fallMoves > 0 ? motifChordTone(endTarget, start - 4, peak - 1) : peak;
+
+  const degs = [start];
+  motifSpread(rise, riseMoves, id, 0).forEach(m => degs.push(degs[degs.length - 1] + m));
+  if (fallMoves > 0) {
+    motifSpread(Math.max(peak - end, fallMoves), fallMoves, id, 5)
+      .forEach(m => degs.push(degs[degs.length - 1] - m));
+    degs[degs.length - 1] = end;
+  }
+  const pool = MOTIF_POS.slice(1), chosen = [0];
+  for (let i = 0; i < n - 1; i++) {
+    let p = pool[Math.floor(rnd(35, id, i) * pool.length)], guard = 0;
+    while (chosen.indexOf(p) >= 0 && guard++ < 12) p = pool[Math.floor(rnd(36, id, i * 13 + guard) * pool.length)];
+    if (chosen.indexOf(p) < 0) chosen.push(p);
+  }
+  chosen.sort((a, b) => a - b);
+  while (chosen.length < degs.length) degs.pop();
+  if (peakIdx < chosen.length) {
+    let best = chosen[peakIdx], bd = 99;
+    for (const st of MOTIF_STRONG) {
+      if (chosen.indexOf(st) >= 0 && st !== chosen[peakIdx]) continue;
+      const prev = peakIdx > 0 ? chosen[peakIdx - 1] : -1;
+      const nxt = peakIdx + 1 < chosen.length ? chosen[peakIdx + 1] : 99;
+      const d = Math.abs(st - chosen[peakIdx]);
+      if (st > prev && st < nxt && d < bd) { bd = d; best = st; }
+    }
+    chosen[peakIdx] = best;
+  }
+  let d2 = degs.slice(0, chosen.length);
+  const top = Math.max.apply(null, d2);
+  if (top > 6) { const sh = top - 6; d2 = d2.map(x => x - sh); }   // shift down, shape intact
+  const bot = Math.min.apply(null, d2);
+  if (bot < 0) d2 = d2.map(x => x - bot);
+  _motifs[id] = { steps: chosen, degs: d2 };
+  return _motifs[id];
+}
+
+// -- pattern libraries --------------------------------------------
+// Each entry is a list of 16th-note positions (0-15) where the voice hits.
+const HIT_HI = 0.97, HIT_LO = 0.02;
+function stepProfile(patterns, name, fallback) {
+  const hits = patterns[name] || patterns[fallback];
+  return Array.from({ length: 16 }, (_, i) => (hits.indexOf(i) >= 0 ? HIT_HI : HIT_LO));
+}
+
+const KICK_PATTERNS = {
+  '4x4':     [0, 4, 8, 12],
+  triplet:   [0, 3, 6, 8, 11, 14],
+  twostep:   [0, 10],
+  halftime:  [0],
+  broken:    [0, 6, 10],
+  dubstep:   [0, 7],
+  // reggae one-drop: nothing on beat 1, kick lands with the snare on beat 3.
+  // bundled with CLAP_PATTERNS.onedrop below into MODE='reggae' - see the
+  // honest caveat on that mode above before expecting it to sound like reggae.
+  onedrop:   [8],
+};
+function kickProfile(name) { return stepProfile(KICK_PATTERNS, name, '4x4'); }
+
+const CLAP_PATTERNS = {
+  backbeat: [4, 12],
+  halftime: [8],
+  onedrop:  [8],
+  // no clap voice at all. clap isn't optional (it's always in the kit), so
+  // this can't force true silence - the anti-silence safeguard in origFor()
+  // below will still pick one lonely accent per song and hold it there. In
+  // practice that reads as an occasional stray rim/clap, which suits dub's
+  // sparse, accidental-sounding percussion rather than fighting it.
+  none:     [],
+};
+function clapProfile(name) { return stepProfile(CLAP_PATTERNS, name, 'backbeat'); }
+
+// HAT_ROLL=1 swaps the accented hat profile for near-even rolling 16ths -
+// the constant tick-tick-tick under a psytrance bassline, rather than
+// techno's accented "e"/"a" pattern.
+const HAT_ACCENTED = [
+  0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20,
+  0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20 ];
+const HAT_ROLLING = new Array(16).fill(0.90);
+function hatProfile(roll) { return roll ? HAT_ROLLING : HAT_ACCENTED; }
+
+// Bass rhythm is a SHAPE, not a density dial - 'roll16' fires on nearly every
+// non-kick 16th (the original house/techno rolling bass, fine at ~125-150bpm)
+// while 'offbeat' fires only on the "and" of each beat (2,6,10,14 - 8th-note
+// spacing), which reads as a rolling reese bass at faster tempos like dnb
+// without the note-rate scaling out of control as BPM climbs. Add named shapes
+// here as you need them; kick steps are always silenced regardless (see
+// BASS_VOICE.avoid below), so a listed position that lands on a kick is just
+// a deliberate gap, not a bug.
+const BASS_PATTERNS = {
+  offbeat:    [2, 6, 10, 14],
+  syncopated: [2, 9, 12],
+};
+function bassProfile(name, kickSteps) {
+  if (name === 'roll16') {
+    return kickSteps.map((isKick, s) => isKick ? 0 : (s % 4 === 2 ? BASS_OFFBEAT : BASS_SIXTEENTH));
+  }
+  const hits = BASS_PATTERNS[name] || BASS_PATTERNS.offbeat;
+  return kickSteps.map((isKick, s) => (isKick || hits.indexOf(s) < 0) ? 0 : BASS_OFFBEAT);
+}
+
+const VOICES = [
+  { name: 'kick', note: 36, songStable: true, include: 1.00, ghost: 0.25, drift: 0, dropsOut: true,
+    vel: [0.88, 0.96],
+    accent: [1.00,1,1,1, 0.95,1,1,1, 0.975,1,1,1, 0.95,1,1,1],
+    profile: kickProfile(KICK_PATTERN) },
+  { name: 'hat',  note: 42, rest: 0.10, include: 1.00, ghost: 1.00, drift: 1.00,
+    openNote: 46, openInclude: 0.75,
+    openProfile: [0,0,0.02,0, 0,0,0.10,0, 0,0,0.02,0, 0,0,0.45,0.05],
+    profile: hatProfile(HAT_ROLL) },
+  { name: 'clap', note: 39, rest: 0.25, include: 0.95, ghost: 0.40, drift: 0.40,
+    profile: clapProfile(CLAP_PATTERN) },
+  { name: 'rim',  note: 37, rest: 0.30, include: 0.90, ghost: 0.30, drift: 1.00,
+    profile: [0.50, 0.08, 0.18] },
+
+  { name: 'snare', notes: [38, 41, 43], optional: true, rest: 0.30, include: 0.35, ghost: 0.30, drift: 0.30, profile: [
+    0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.02,
+    0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.04 ] },
+
+  { name: 'ride', notes: [50, 51], optional: true, rest: 0.30, include: 0.45, ghost: 0.60, drift: 0.50,
+    minEnergy: 65,
+    accent: [0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1],
+    profile: [
+    0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04,
+    0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04 ] },
+
+  { name: 'lowtom', note: 44, optional: true, rest: 0.35, include: 0.45, ghost: 0.25, drift: 0.80,
+    minEnergy: 35, profile: [0.38, 0.06, 0.06, 0.18, 0.06] },
+
+  { name: 'midtom', notes: [45, 47], optional: true, rest: 0.35, include: 0.40, ghost: 0.25, drift: 0.80,
+    minEnergy: 45, profile: [0.34, 0.05, 0.12, 0.05, 0.18, 0.05, 0.09] },
+
+  { name: 'crash', notes: [48, 49], optional: true, include: 0.50, role: 'marker' },
+
+  { name: 'bass', rest: 0.12, include: 1.00, ghost: 0, drift: 0.45, dropsOut: true,
+    pitched: true, clip: BASS_CLIP, chan: bassChan, profile: null },
+
+  { name: 'motif', rest: 0.30, include: MOTIF_ON ? 1.00 : 0, role: 'motif', chan: motifChan,
+    clip: MOTIF_CLIP, vel: [0.66, 0.86] },
+
+  { name: 'stab', rest: 0.20, include: STAB_ON ? 1.00 : 0, ghost: 0, drift: 0.20,
+    pitched: true, chordTones: [0, 2, 4], clip: STAB_CLIP, chan: stabChan,
+    vel: [0.62, 0.82], profile: [
+    0.02,0.02,0.35,0.04, 0.02,0.02,0.30,0.04,
+    0.02,0.02,0.35,0.04, 0.02,0.06,0.40,0.08 ] },
+];
+
+const voiceNamed = n => VOICES.filter(v => v.name === n)[0];
+const KICK_VOICE = voiceNamed('kick');
+KICK_VOICE.drift = 0;
+const KICK_STEPS = KICK_VOICE.profile.map((p, s) => rnd(0, VOICES.indexOf(KICK_VOICE) * 997 + s, 0) < p);
+const BASS_VOICE = voiceNamed('bass');
+BASS_VOICE.avoid = KICK_STEPS;
+BASS_VOICE.profile = bassProfile(BASS_PATTERN, KICK_STEPS);
+
+function bassChoiceAt(vi, step, sec) {
+  const r = rnd(21, vi * 997 + step, sec);
+  let acc = 0;
+  for (const c of BASS_CHOICES) { acc += c.w; if (r < acc) return c; }
+  return BASS_CHOICES[0];
+}
+
+const CRASH_AT_SECTION = 0.45;
+const CRASH_VEL_LO = 0.80, CRASH_VEL_HI = 0.95;
+const OPEN_ACCENT = 1.10;
+
+// Kit membership is per song, so a new song is genuinely a new kit. Every voice
+// stays in the stack and is gated instead, the same way minEnergy gates.
+const _kits = {};
+function kitFor(song) {
+  if (_kits[song]) return _kits[song];
+  const core = VOICES.filter(v => !v.optional && rnd(11, VOICES.indexOf(v), song) < v.include);
+  const opts = VOICES.filter(v => v.optional)
+    .map(v => ({ v, r: rnd(12, VOICES.indexOf(v), song) }))
+    .filter(o => o.r < o.v.include)
+    .sort((a, b) => a.r - b.r)
+    .slice(0, MAX_OPTIONAL)
+    .map(o => o.v);
+  const names = {};
+  core.concat(opts).forEach(v => { names[v.name] = true; });
+  _kits[song] = names;
+  return names;
+}
+const KIT = VOICES;
+
+const SECTION = 4;
+const DRIFT_CHANCE = 0.5;
+const MAX_DRIFT = 3;
+
+// The profile itself drifts too, not just the skeleton rolled from it. Same
+// cadence as the skeleton (checked once per SECTION) and the same per-voice
+// drift knob, so the kick, at drift 0, never moves. Caged to a band around
+// the printed value rather than reset only at song boundaries: a set runs
+// for hours inside one song, and a value that only moved at song turnover
+// would jump, not creep.
+const PROFILE_DRIFT_CHANCE = 0.20; // per SECTION, times v.drift
+const PROFILE_DRIFT_AMOUNT = 0.05; // size of one nudge
+const PROFILE_DRIFT_BAND   = 0.25; // max distance from the printed value, clamped to 0..1
+
+function voicePattern(v, vi) {
+  const nn = v.notes ? v.notes[Math.floor(rnd(15, vi, 0) * v.notes.length) % v.notes.length] : v.note;
+
+  if (v.role === 'marker') {
+    const mgate = sig(t => {
+      if (Math.floor(t * STEPS) % STEPS !== 0) return false;
+      const bar = Math.floor(t);
+      if (!kitFor(songAtBar(bar))[v.name]) return false;
+      if (bar % BARS_PER_PHRASE === 0) {
+        const ph = Math.floor(bar / BARS_PER_PHRASE);
+        if (ph > 0 && !phrase(ph).drop && phrase(ph - 1).drop) return true;
+      }
+      if (bar % (BARS_PER_PHRASE * SECTION) !== 0) return false;
+      return rnd(13, vi, bar) < CRASH_AT_SECTION * efrac(phrase(Math.floor(bar / BARS_PER_PHRASE)));
+    }).segment(STEPS);
+    const mvel = sig(t => CRASH_VEL_LO + rnd(14, vi, Math.floor(t)) * (CRASH_VEL_HI - CRASH_VEL_LO)).segment(STEPS);
+    return note(nn).struct(mgate).velocity(mvel);
+  }
+
+  // ---- the lead: a 2-bar motif, repeated, then its ending altered ----
+  if (v.role === 'motif') {
+    const noteAt = (step, bar) => {
+      const inCycle = ((bar % MOTIF_CYCLE) + MOTIF_CYCLE) % MOTIF_CYCLE;
+      if (inCycle > 1) return null;               // the rest bar(s) between statements
+      const sec = Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+      const m = motifFor(songAtBar(bar) * 977 + sec);
+      const pos = inCycle * STEPS + step;
+      const i = m.steps.indexOf(pos);
+      if (i < 0) return null;
+      const statement = Math.floor(bar / MOTIF_CYCLE);
+      let deg = m.degs[i];
+      // repeat verbatim, then alter only the ending, every other statement
+      if (statement % 2 === 1 && i === m.degs.length - 1) deg = motifChordTone(deg - 2, 0, 6);
+      return deg;
+    };
+    const g2 = sig(t => {
+      const step = Math.floor(t * STEPS) % STEPS, bar = Math.floor(t);
+      if (!MOTIF_ON) return false;
+      if (!kitFor(songAtBar(bar))[v.name]) return false;
+      return noteAt(step, bar) !== null;
+    }).segment(STEPS);
+    const n2 = sig(t => {
+      const step = Math.floor(t * STEPS) % STEPS, bar = Math.floor(t);
+      const sc = scaleAtBar(bar);
+      const d = noteAt(step, bar) === null ? 0 : noteAt(step, bar);
+      const o = Math.floor(d / 7), ix = ((d % 7) + 7) % 7;
+      return MOTIF_OCTAVE + sc.root + sc.steps[ix] + 12 * o;
+    }).segment(STEPS);
+    const v2 = sig(t => {
+      const bar = Math.floor(t), step = Math.floor(t * STEPS) % STEPS;
+      return v.vel[0] + rnd(2, vi * 997 + step, bar) * (v.vel[1] - v.vel[0]);
+    }).segment(STEPS);
+    const outM = note(n2).struct(g2).velocity(v2);
+    return v.clip !== undefined ? outM.clip(v.clip) : outM;
+  }
+
+  // The kick keeps one skeleton across every song - it is the grid, and the
+  // bass avoid list is derived from it once at load. Everything else gets a
+  // fresh pattern when the song turns over.
+  // A voice's pattern is as long as its profile. 16 lines up with the bar. 3, 5
+  // or 7 do not divide into 16, so the pattern walks around the bar and only
+  // realigns every lcm(len,16) steps. That is Reich's phasing, on a drum grid.
+  const len = v.profile.length;
+  const maxDrift = Math.max(1, Math.min(MAX_DRIFT, Math.floor(len / 3)));
+  const songOf = song => v.songStable ? 0 : song;
+  const _origs = {};
+  function origFor(song) {
+    const k = songOf(song);
+    if (_origs[k]) return _origs[k];
+    const o = v.profile.map((p, s2) => rnd(0, vi * 997 + s2, k) < p);
+    if (!o.some(Boolean)) {
+      const peak = Math.max.apply(null, v.profile);
+      const strong = [];
+      v.profile.forEach((p, s2) => { if (p >= peak / 2) strong.push(s2); });
+      o[strong[Math.floor(rnd(22, vi, k) * strong.length) % strong.length]] = true;
+    }
+    _origs[k] = o;
+    return o;
+  }
+
+  // The profile is its own slow chain, one step nudged at a time, caged to
+  // PROFILE_DRIFT_BAND around the printed value in v.profile. It is keyed and
+  // paced exactly like the skeleton chain below, just with a different kind
+  // per rnd() call so the two systems never correlate.
+  const _profiles = {};
+  function profileAt(sec, song) {
+    const k = songOf(song);
+    const chain = _profiles[k] || (_profiles[k] = [v.profile.slice()]);
+    if (!(sec >= 0)) sec = 0;
+    sec = Math.min(sec, chain.length + 4096);
+    while (chain.length <= sec) {
+      const n = chain.length, prev = chain[n - 1];
+      let next = prev;
+      if (rnd(26, vi * 997 + k, n) < PROFILE_DRIFT_CHANCE * v.drift) {
+        const step = Math.floor(rnd(27, vi * 997 + k, n) * len) % len;
+        const dir  = rnd(28, vi * 997 + step + k, n) < 0.5 ? -1 : 1;
+        const base = v.profile[step];
+        const lo   = Math.max(0, base - PROFILE_DRIFT_BAND);
+        const hi   = Math.min(1, base + PROFILE_DRIFT_BAND);
+        const nudged = Math.max(lo, Math.min(hi, prev[step] + dir * PROFILE_DRIFT_AMOUNT));
+        if (nudged !== prev[step]) {
+          next = prev.slice();
+          next[step] = nudged;
+        }
+      }
+      chain.push(next);
+    }
+    return chain[sec];
+  }
+
+  const _chains = {};
+  function skelAt(sec, song) {
+    const k = songOf(song);
+    const orig = origFor(song);
+    const chain = _chains[k] || (_chains[k] = [orig]);
+    if (!(sec >= 0)) sec = 0;
+    sec = Math.min(sec, chain.length + 4096);
+    while (chain.length <= sec) {
+      const n = chain.length, prev = chain[n - 1];
+      let next = prev;
+      if (rnd(8, vi * 997 + k, n) < DRIFT_CHANCE * v.drift) {
+        const step = Math.floor(rnd(9, vi * 997 + k, n) * len) % len;
+        const val  = rnd(10, vi * 997 + step + k, n) < profileAt(n, song)[step];
+        if (val !== prev[step]) {
+          const cand = prev.slice();
+          cand[step] = val;
+          let d = 0;
+          for (let i = 0; i < len; i++) if (cand[i] !== orig[i]) d++;
+          if (d <= maxDrift) next = cand;
+        }
+      }
+      chain.push(next);
+    }
+    return chain[sec];
+  }
+
+  const secOf = bar => Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const idxAt = (step, bar) => (bar * STEPS + step) % len;
+  // a voice sits out a whole 16-bar section. Different from a drop, which is
+  // kick+bass leaving together at high energy. This is one voice, any energy.
+  const restChance = Math.max(0, Math.min(0.75, (v.rest || 0) * SPARSE));
+  const restsAt = bar => restChance > 0 && rnd(23, vi, secOf(bar)) < restChance;
+
+  function lift(bar) {
+    if (bar % BARS_PER_PHRASE !== BARS_PER_PHRASE - 1) return 1;
+    const phraseInSection = Math.floor(bar / BARS_PER_PHRASE) % SECTION;
+    return phraseInSection === SECTION - 1 ? SECTION_LIFT : PHRASE_LIFT;
+  }
+  const isPickup = (step, bar) => skelAt(secOf(bar), songAtBar(bar))[(idxAt(step, bar) + 1) % len];
+
+  const voiceFloor = (v.vel ? v.vel[0] : SKEL_VEL_LO) *
+                     (v.accent ? Math.min.apply(null, v.accent) : 1);
+  const ghostCeil = voiceFloor - 0.02;
+
+  const useOpen = v.openNote ? rnd(17, vi, 0) < v.openInclude : false;
+  const rawOpen = (step, bar) => rnd(16, vi * 997 + step, bar) < v.openProfile[step];
+  function isOpen(step, bar) {
+    if (!useOpen || !rawOpen(step, bar)) return false;
+    for (let k = 1; k <= 3; k++) {
+      let s = step - k, b = bar;
+      if (s < 0) { s += STEPS; b -= 1; }
+      if (b >= 0 && rawOpen(s, b)) return false;
+    }
+    return true;
+  }
+  const openAt = (step, bar) => v.openNote && skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)] && isOpen(step, bar);
+
+  const gate = sig(t => {
+    const step = Math.floor(t * STEPS) % STEPS;
+    const bar  = Math.floor(t);
+    const st   = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (v.dropsOut && st.drop) return false;
+    if (v.minEnergy !== undefined && st.e < v.minEnergy) return false;
+    if (v.avoid && v.avoid[step]) return false;
+    if (!kitFor(songAtBar(bar))[v.name]) return false;
+    if (restsAt(bar)) return false;
+    if (skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)]) return true;
+    const w = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
+    const shaped = w * MAX_GHOST * v.ghost * lift(bar) *
+                   (isPickup(step, bar) ? PICKUP_BIAS : PICKUP_ELSE);
+    return rnd(1, vi * 997 + step, bar) < shaped;
+  }).segment(STEPS);
+
+  const vel = sig(t => {
+    const step = Math.floor(t * STEPS) % STEPS;
+    const bar  = Math.floor(t);
+    if (skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)]) {
+      const vlo  = v.vel ? v.vel[0] : SKEL_VEL_LO;
+      const vhi  = v.vel ? v.vel[1] : SKEL_VEL_HI;
+      const acc = (v.accent ? v.accent[step] : 1) * (openAt(step, bar) ? OPEN_ACCENT : 1);
+      const hiA = Math.min(1, vhi * acc);
+      const loA = Math.min(hiA, vlo * acc);
+      return loA + rnd(2, vi * 997 + step, bar) * (hiA - loA);
+    }
+    const f  = efrac(phrase(Math.floor(bar / BARS_PER_PHRASE)));
+    const lo = GVEL_LO_A + f * (GVEL_LO_B - GVEL_LO_A);
+    const hi = GVEL_HI_A + f * (GVEL_HI_B - GVEL_HI_A);
+    const pk = isPickup(step, bar) ? PICKUP_VEL : 1;
+    const hiG = Math.min(ghostCeil, hi * pk);
+    const loG = Math.min(hiG, lo * pk);
+    return loG + rnd(3, vi * 997 + step, bar) * (hiG - loG);
+  }).segment(STEPS);
+
+  const noteSig = v.pitched
+    ? sig(t => {
+        const step = Math.floor(t * STEPS) % STEPS;
+        const bar  = Math.floor(t);
+        const sc   = scaleAtBar(bar);
+        const c    = bassChoiceAt(vi, step, secOf(bar));
+        return BASS_OCTAVE + sc.root + sc.steps[c.idx] + 12 * c.oct;
+      }).segment(STEPS)
+    : v.openNote
+      ? sig(t => openAt(Math.floor(t * STEPS) % STEPS, Math.floor(t)) ? v.openNote : nn).segment(STEPS)
+      : nn;
+
+  if (v.chordTones) {
+    const layers = v.chordTones.map(idx => {
+      const s = sig(t => {
+        const sc = scaleAtBar(Math.floor(t));
+        return STAB_OCTAVE + sc.root + sc.steps[idx];
+      }).segment(STEPS);
+      const layer = note(s).struct(gate).velocity(vel);
+      return v.clip !== undefined ? layer.clip(v.clip) : layer;
+    });
+    return stack.apply(null, layers);
+  }
+
+  const out = note(noteSig).struct(gate).velocity(vel);
+  return v.clip !== undefined ? out.clip(v.clip) : out;
+}
+
+const withSwing = p => SWING > 0 ? p.swingBy(SWING, SWING_GRID) : p;
+const patternsFor = pred =>
+  stack(...KIT.filter(pred).map(v => voicePattern(v, VOICES.indexOf(v))));
+
+const chanOf = v => v.chan !== undefined ? v.chan : drumChan;
+const usedChans = KIT.map(chanOf).filter((c, i, a) => a.indexOf(c) === i).sort((a, b) => a - b);
+
+// The feedback walk's step size now scales with the energy walk: tight and
+// slow while climbing, wider while a drop is out - so the delay visibly
+// "opens up" into breakdowns instead of ambling independently of the arc.
+const _ccfbWalk = [(DELAYFB_LO + DELAYFB_HI) / 2];
+function ccDelayFbAt(bar) {
+  if (!(bar >= 0)) bar = 0;
+  bar = Math.min(bar, _ccfbWalk.length + 4096);
+  while (_ccfbWalk.length <= bar) {
+    const n = _ccfbWalk.length, prev = _ccfbWalk[n - 1];
+    const st = phrase(Math.floor(n / BARS_PER_PHRASE));
+    const bias = st.drop ? DELAYFB_STEP * 2 : DELAYFB_STEP * (0.5 + efrac(st));
+    const step = (rnd(60, n, 0) * 2 - 1) * bias;
+    _ccfbWalk.push(Math.max(DELAYFB_LO, Math.min(DELAYFB_HI, prev + step)));
+  }
+  return _ccfbWalk[bar];
+}
+const delayFbCC = ccv(sig(t => ccDelayFbAt(Math.floor(t))).segment(1))
+  .ccn(DELAYFB_CCN)
+  .midichan(stabChan);
+
+stack(
+  ...usedChans.map(ch => withSwing(patternsFor(v => chanOf(v) === ch)).midichan(ch)),
+  delayFbCC
+).midi(midi)
