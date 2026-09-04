@@ -1,0 +1,955 @@
+// BASS ENGINE - live - v8
+const midi = 'IAC Driver Bus 1';
+
+const SEED     = 7;      // set: 1-100ish
+const OPEN_KEY = '6m';   // set: 1m-12m | 1d-12d
+
+//    | trap/130-170 | dub/70-90 |
+const BPM = 140;   // set: trap 130-170 | dub 60-90 | dubstep 138-142 | dnb 160-180
+const BPM_RAMP_SECONDS = 8;   // set: 0-30
+
+if (typeof setcpm !== 'undefined') {
+  const _tempo = (globalThis.__bassEngineTempo = globalThis.__bassEngineTempo || { bpm: undefined, timer: null });
+  if (_tempo.timer) { clearInterval(_tempo.timer); _tempo.timer = null; }
+  if (_tempo.bpm === undefined || BPM_RAMP_SECONDS <= 0 || _tempo.bpm === BPM) {
+    _tempo.bpm = BPM;
+    setcpm(BPM / 4);
+  } else {
+    const fromBpm = _tempo.bpm, toBpm = BPM, stepMs = 100;
+    const steps = Math.max(1, Math.round(BPM_RAMP_SECONDS * 1000 / stepMs));
+    let step = 0;
+    _tempo.timer = setInterval(() => {
+      step += 1;
+      const t = Math.min(1, step / steps);
+      _tempo.bpm = fromBpm + (toBpm - fromBpm) * t;
+      setcpm(_tempo.bpm / 4);
+      if (t >= 1) { clearInterval(_tempo.timer); _tempo.timer = null; }
+    }, stepMs);
+  }
+}
+
+const MODE = 'trap';
+const MODE_OVERRIDES = {};
+
+const drumChan = 1, bass808Chan = 2, leadChan = 3, skankChan = 4;
+
+const STEPS = 16;
+const HAT_STEPS = 32;
+const BARS_PER_PHRASE = 4;
+
+const sig = (typeof signal !== 'undefined') ? signal : (f) => time.fmap(f);
+
+function rnd(kind, a, b) {
+  let h = (kind * 374761393 + a * 668265263 + b * 2246822519 + SEED * 3266489917) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = Math.imul(h ^ (h >>> 16), 2246822507);
+  h = h ^ (h >>> 15);
+  return (h >>> 0) / 4294967296;
+}
+function growChain(arr, i, step) {
+  if (!(i >= 0)) i = 0;
+  i = Math.min(i, arr.length + 4096);
+  while (arr.length <= i) arr.push(step(arr));
+  return arr[i];
+}
+const stepBar = (t, steps = STEPS) => [Math.floor(t * steps) % steps, Math.floor(t)];
+
+function weightedChoice(kind, vi, step, sec, choices) {
+  const r = rnd(kind, vi * 997 + step, sec);
+  let acc = 0;
+  for (const c of choices) { acc += c.w; if (r < acc) return c; }
+  return choices[0];
+}
+
+const MODE_PRESETS = {
+  trap: {
+    bass808Pattern: [0, 3, 7, 10, 13],
+    bass808Octave: 36,
+    bass808Drift: 0.35,
+    bass808Rest: 0.10,
+    bass808Choices: [
+      { idx: 0, oct: 0,  w: 0.70 },
+      { idx: 4, oct: 0,  w: 0.18 },
+      { idx: 0, oct: -1, w: 0.07 },
+      { idx: 6, oct: -1, w: 0.05 },
+    ],
+    bass808ChoicesEnd: [
+      { idx: 0, oct: 0,  w: 0.40 },
+      { idx: 4, oct: 0,  w: 0.15 },
+      { idx: 0, oct: -1, w: 0.30 },
+      { idx: 6, oct: -1, w: 0.15 },
+    ],
+    kickReinforce: 0.6,
+    kickReinforceDrift: 0.15,
+    kickGhost: 0.06,
+    kickBeat1Chance: 0.85,
+    kickFillBoost: 2.5,
+    kickDropsOut: true,
+    snarePattern: [8],
+    snareDrift: 0.30,
+    snareRest: 0.15,
+    snareGhost: 0.30,
+    snareFillBoost: 2.2,
+    snareNudgeMs: 0,
+    rollOn: true,
+    hatBaseSubsteps: [0, 2, 4, 6],
+    rollBaseChance: 0.12,
+    rollPhraseEndMult: 2.5,
+    rollLengths: [{ n: 6, w: 0.45 }, { n: 8, w: 0.55 }],
+    swingPct: 50,
+    swingGrid: 8,
+    scaleMode: 'natural',
+    phrygianChance: 0.35,
+    keyMoveChance: 0.08,
+    chordLoopTemplates: [
+      { degs: [0],          w: 0.30 },
+      { degs: [0, 5],       w: 0.25 },
+      { degs: [0, 6],       w: 0.20 },
+      { degs: [0, 3],       w: 0.15 },
+      { degs: [0, 5, 6, 5], w: 0.10 },
+    ],
+    chordLoopBarLen: 1,
+    motifOn: true,
+    motifCycle: 4,
+    motifNoteRange: [2, 4],
+    motifOctave: 72,
+    motifClip: 0.55,
+    skankOn: false,
+    skankPattern: [2, 6, 10, 14],
+    skankDrift: 0.25,
+    skankRest: 0.15,
+    skankGhost: 0,
+    skankOctave: 67,
+    skankClip: 0.25,
+    dropPatience: 15,
+    dropBars: 6,
+    songMinutes: 3.2,
+    sectionSeconds: 32,
+    sparse: 1.1,
+  },
+
+  dub: {
+    bass808Pattern: [8, 14],
+    bass808Octave: 36,
+    bass808Drift: 0.15,
+    bass808Rest: 0.05,
+    bass808Choices: [
+      { idx: 0, oct: 0,  w: 0.55 },
+      { idx: 4, oct: 0,  w: 0.30 },
+      { idx: 0, oct: 1,  w: 0.10 },
+      { idx: 2, oct: 0,  w: 0.05 },
+    ],
+    bass808ChoicesEnd: [
+      { idx: 0, oct: 0,  w: 0.55 },
+      { idx: 4, oct: 0,  w: 0.30 },
+      { idx: 0, oct: 1,  w: 0.10 },
+      { idx: 2, oct: 0,  w: 0.05 },
+    ],
+    kickReinforce: 0.85,
+    kickReinforceDrift: 0.10,
+    kickGhost: 0,
+    kickBeat1Chance: 0,
+    kickFillBoost: 1.5,
+    kickDropsOut: false,
+    snarePattern: [8],
+    snareDrift: 0.15,
+    snareRest: 0.05,
+    snareGhost: 0.10,
+    snareFillBoost: 1.5,
+    snareNudgeMs: 12,
+    rollOn: false,
+    hatBaseSubsteps: [0, 4],
+    rollBaseChance: 0.12,
+    rollPhraseEndMult: 2.5,
+    rollLengths: [{ n: 6, w: 0.45 }, { n: 8, w: 0.55 }],
+    swingPct: 58,
+    swingGrid: 8,
+    scaleMode: 'natural',
+    phrygianChance: 0,
+    keyMoveChance: 0.03,
+    chordLoopTemplates: [
+      { degs: [0],    w: 0.45 },
+      { degs: [0, 3], w: 0.30 },
+      { degs: [0, 5], w: 0.15 },
+      { degs: [0, 6], w: 0.10 },
+    ],
+    chordLoopBarLen: 2,
+    motifOn: false,
+    motifCycle: 4,
+    motifNoteRange: [2, 4],
+    motifOctave: 72,
+    motifClip: 0.55,
+    skankOn: true,
+    skankPattern: [2, 6, 10, 14],
+    skankDrift: 0.20,
+    skankRest: 0.10,
+    skankGhost: 0.15,
+    skankOctave: 67,
+    skankClip: 0.25,
+    dropPatience: -15,
+    dropBars: 6,
+    songMinutes: 25.9,
+    sectionSeconds: 48,
+    sparse: 1.4,
+  },
+
+  dubstep: {
+    bass808Pattern: [0, 5, 8, 10, 14],
+    bass808Octave: 36,
+    bass808Drift: 0.25,
+    bass808Rest: 0.08,
+    bass808Choices: [
+      { idx: 0, oct: 0,  w: 0.75 },
+      { idx: 0, oct: -1, w: 0.15 },
+      { idx: 4, oct: 0,  w: 0.10 },
+    ],
+    bass808ChoicesEnd: [
+      { idx: 0, oct: 0,  w: 0.45 },
+      { idx: 0, oct: -1, w: 0.40 },
+      { idx: 4, oct: 0,  w: 0.15 },
+    ],
+    kickReinforce: 0.65,
+    kickReinforceDrift: 0.15,
+    kickGhost: 0.05,
+    kickBeat1Chance: 0.80,
+    kickFillBoost: 2.0,
+    kickDropsOut: true,
+    snarePattern: [8],
+    snareDrift: 0.25,
+    snareRest: 0.12,
+    snareGhost: 0.15,
+    snareFillBoost: 2.0,
+    snareNudgeMs: 0,
+    rollOn: false,
+    hatBaseSubsteps: [0, 4],
+    rollBaseChance: 0.12,
+    rollPhraseEndMult: 2.5,
+    rollLengths: [{ n: 6, w: 0.45 }, { n: 8, w: 0.55 }],
+    swingPct: 50,
+    swingGrid: 8,
+    scaleMode: 'natural',
+    phrygianChance: 0,
+    keyMoveChance: 0.03,
+    chordLoopTemplates: [
+      { degs: [0],    w: 0.40 },
+      { degs: [0, 5], w: 0.30 },
+      { degs: [0, 3], w: 0.20 },
+      { degs: [0, 6], w: 0.10 },
+    ],
+    chordLoopBarLen: 2,
+    motifOn: true,
+    motifCycle: 4,
+    motifNoteRange: [2, 3],
+    motifOctave: 72,
+    motifClip: 0.6,
+    skankOn: false,
+    skankPattern: [2, 6, 10, 14],
+    skankDrift: 0.25,
+    skankRest: 0.15,
+    skankGhost: 0,
+    skankOctave: 67,
+    skankClip: 0.25,
+    dropPatience: 10,
+    dropBars: 6,
+    songMinutes: 4.0,
+    sectionSeconds: 40,
+    sparse: 1.2,
+  },
+
+  dnb: {
+    bass808Pattern: [0, 6, 8, 12],
+    bass808Octave: 36,
+    bass808Drift: 0.25,
+    bass808Rest: 0.08,
+    bass808Choices: [
+      { idx: 0, oct: 0,  w: 0.65 },
+      { idx: 0, oct: -1, w: 0.20 },
+      { idx: 4, oct: 0,  w: 0.10 },
+      { idx: 6, oct: -1, w: 0.05 },
+    ],
+    bass808ChoicesEnd: [
+      { idx: 0, oct: 0,  w: 0.35 },
+      { idx: 0, oct: -1, w: 0.35 },
+      { idx: 4, oct: 0,  w: 0.15 },
+      { idx: 6, oct: -1, w: 0.15 },
+    ],
+    kickReinforce: 0.70,
+    kickReinforceDrift: 0.15,
+    kickGhost: 0.15,
+    kickBeat1Chance: 0.85,
+    kickFillBoost: 2.5,
+    kickDropsOut: true,
+    snarePattern: [8],
+    snareDrift: 0.15,
+    snareRest: 0.05,
+    snareGhost: 0.20,
+    snareFillBoost: 2.5,
+    snareNudgeMs: 0,
+    rollOn: true,
+    hatBaseSubsteps: [0, 2, 4, 6],
+    rollBaseChance: 0.08,
+    rollPhraseEndMult: 3.0,
+    rollLengths: [{ n: 8, w: 0.35 }, { n: 12, w: 0.35 }, { n: 16, w: 0.30 }],
+    swingPct: 50,
+    swingGrid: 8,
+    scaleMode: 'natural',
+    phrygianChance: 0,
+    keyMoveChance: 0.08,
+    chordLoopTemplates: [
+      { degs: [0],    w: 0.30 },
+      { degs: [0, 5], w: 0.25 },
+      { degs: [0, 6], w: 0.20 },
+      { degs: [0, 3], w: 0.15 },
+      { degs: [0, 5, 6, 5], w: 0.10 },
+    ],
+    chordLoopBarLen: 2,
+    motifOn: true,
+    motifCycle: 4,
+    motifNoteRange: [2, 4],
+    motifOctave: 74,
+    motifClip: 0.5,
+    skankOn: false,
+    skankPattern: [2, 6, 10, 14],
+    skankDrift: 0.25,
+    skankRest: 0.15,
+    skankGhost: 0,
+    skankOctave: 67,
+    skankClip: 0.25,
+    dropPatience: 15,
+    dropBars: 6,
+    songMinutes: 4.5,
+    sectionSeconds: 36,
+    sparse: 0.9,
+  },
+};
+
+const _preset = { ...(MODE_PRESETS[MODE] || MODE_PRESETS.trap), ...MODE_OVERRIDES };
+
+const SWING_PCT = _preset.swingPct;
+const SWING_GRID = _preset.swingGrid;
+const SWING = (SWING_PCT - 50) / 50;
+
+const E_START = 30, E_MAX = 100;
+const CLIMB_LO = 0.5, CLIMB_HI = 2.0;
+const DROP_PATIENCE = _preset.dropPatience;
+const DROP_BARS = _preset.dropBars;
+const DROP_PATIENCE_SAFE = Math.max(-35, Math.min(45, DROP_PATIENCE));
+const DROP_LO = 40 + DROP_PATIENCE_SAFE;
+const DROP_HI = Math.max(DROP_LO + 5, Math.min(100, 90 + DROP_PATIENCE_SAFE));
+const DROP_MAX_CHANCE = 0.18;
+const DROP_COOLDOWN = 4;
+const RELEASE_LO = 0.3, RELEASE_HI = 0.6;
+
+const SECS_PER_BAR = 240 / BPM;
+const SONG_MINUTES = _preset.songMinutes;
+const SECTION = Math.max(1, Math.round(_preset.sectionSeconds / (SECS_PER_BAR * BARS_PER_PHRASE)));
+const REST_CAP_MULT = 0.75;
+const SPARSE = _preset.sparse;
+
+function dropPhraseTarget(bars, roll) {
+  const phrases = Math.max(1, bars / BARS_PER_PHRASE);
+  return Math.max(1, Math.round(phrases * (0.75 + roll * 0.5)));
+}
+function avgBarsPerDrop(patience, dropBars) {
+  const pSafe = Math.max(-35, Math.min(45, patience));
+  const pLo = 40 + pSafe, pHi = Math.max(pLo + 5, Math.min(100, 90 + pSafe));
+  let s = 0x9e3779b9;
+  const lcg = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  let e = E_START, cool = 0, drop = false, bar = 0, lastDropBar = -1, dropLen = 0, dropTarget = 0;
+  const gaps = [];
+  for (let n = 0; n < 5000; n++) {
+    e = Math.min(E_MAX, e + CLIMB_LO + lcg() * (CLIMB_HI - CLIMB_LO));
+    let nowDrop = false;
+    if (drop) {
+      nowDrop = dropLen <= dropTarget;
+      if (!nowDrop) cool = DROP_COOLDOWN;
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - pLo) / (pHi - pLo)));
+      if (lcg() < ramp * DROP_MAX_CHANCE) {
+        nowDrop = true;
+        dropTarget = dropPhraseTarget(dropBars, lcg());
+        e = e * (1 - (RELEASE_LO + lcg() * (RELEASE_HI - RELEASE_LO)));
+      }
+    }
+    if (nowDrop && !drop) { if (lastDropBar >= 0) gaps.push(bar - lastDropBar); lastDropBar = bar; }
+    dropLen = nowDrop ? dropLen + 1 : 0;
+    drop = nowDrop;
+    bar += BARS_PER_PHRASE;
+  }
+  return gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : dropBars;
+}
+const SONG_DROPS = SONG_MINUTES > 0
+  ? Math.max(1, Math.round((SONG_MINUTES * 60) / (avgBarsPerDrop(DROP_PATIENCE, DROP_BARS) * SECS_PER_BAR)))
+  : 0;
+
+const _walk = [{ e: E_START, drop: false, cool: 0, song: 0, since: 0, dropLen: 0, dropTarget: 0 }];
+function phrase(i) {
+  return growChain(_walk, i, arr => {
+    const n = arr.length, p = arr[n - 1];
+    let e = Math.min(E_MAX, p.e + CLIMB_LO + rnd(4, n, 0) * (CLIMB_HI - CLIMB_LO));
+    let drop = false, cool = p.cool, song = p.song, since = p.since, dropLen = 0, dropTarget = p.dropTarget;
+    if (p.drop) {
+      dropLen = p.dropLen + 1;
+      drop = dropLen <= p.dropTarget;
+      if (!drop) cool = DROP_COOLDOWN;
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - DROP_LO) / (DROP_HI - DROP_LO)));
+      if (rnd(5, n, 0) < ramp * DROP_MAX_CHANCE) {
+        drop = true;
+        dropLen = 1;
+        dropTarget = dropPhraseTarget(DROP_BARS, rnd(6, n, 0));
+        e = e * (1 - (RELEASE_LO + rnd(7, n, 0) * (RELEASE_HI - RELEASE_LO)));
+        since += 1;
+        if (SONG_DROPS > 0 && since >= SONG_DROPS) { song += 1; since = 0; e = E_START; }
+      }
+    }
+    return { e, drop, cool, song, since, dropLen, dropTarget };
+  });
+}
+const songAtBar = bar => phrase(Math.floor(bar / BARS_PER_PHRASE)).song;
+const efrac = st => Math.max(0, Math.min(1, (st.e - E_START) / (E_MAX - E_START)));
+
+const KEY_MOVE_CHANCE = _preset.keyMoveChance;
+const KEY_RELATIVE_ODDS = 0.25;
+const MAX_KEY_DRIFT = 2;
+
+const PITCH_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
+const PHRYGIAN_SCALE = [0, 1, 3, 5, 7, 8, 10];
+const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
+const PHRYGIAN_CHANCE = _preset.phrygianChance;
+const _scaleFlavors = {};
+function scaleFlavorFor(song) {
+  if (_scaleFlavors[song] !== undefined) return _scaleFlavors[song];
+  return _scaleFlavors[song] = rnd(47, song, 0) < PHRYGIAN_CHANCE ? PHRYGIAN_SCALE : MINOR_SCALE;
+}
+
+function rootOf(num, mode) {
+  const base = (7 * (num - 1)) % 12;
+  return mode === 'm' ? (base + 9) % 12 : base;
+}
+function parseOpenKey(s) {
+  const m = String(s).trim().toLowerCase().match(/^(\d{1,2})([md])$/);
+  if (!m) return { num: 1, mode: 'm' };
+  return { num: Math.min(12, Math.max(1, +m[1])), mode: m[2] };
+}
+function keyName(k) {
+  return k.num + k.mode + ' (' + PITCH_NAMES[rootOf(k.num, k.mode)] + (k.mode === 'm' ? ' minor)' : ' major)');
+}
+function wheelDist(a, b) {
+  const d = Math.abs(a - b) % 12;
+  return Math.min(d, 12 - d);
+}
+
+const KEY_TYPED = parseOpenKey(OPEN_KEY);
+const NEW_SONG_KEY_DRIFT = 3;
+const _origins = {};
+function keyOriginFor(song) {
+  if (_origins[song]) return _origins[song];
+  if (song === 0) { _origins[0] = KEY_TYPED; return KEY_TYPED; }
+  const off = Math.floor(rnd(24, song, 0) * (NEW_SONG_KEY_DRIFT * 2 + 1)) - NEW_SONG_KEY_DRIFT;
+  const num = ((KEY_TYPED.num - 1 + off + 12) % 12) + 1;
+  const mode = rnd(25, song, 0) < 0.30 ? (KEY_TYPED.mode === 'm' ? 'd' : 'm') : KEY_TYPED.mode;
+  _origins[song] = { num, mode };
+  return _origins[song];
+}
+const KEY_ORIGIN = KEY_TYPED;
+const _keys = [KEY_TYPED];
+function keyAtPhrase(ph) {
+  return growChain(_keys, ph, arr => {
+    const n = arr.length, prev = arr[n - 1];
+    const home = keyOriginFor(phrase(n).song);
+    if (phrase(n).song !== phrase(n - 1).song) return home;
+    let next = prev;
+    if (n > 0 && !phrase(n).drop && phrase(n - 1).drop && rnd(18, n, 0) < KEY_MOVE_CHANCE) {
+      if (rnd(19, n, 0) < KEY_RELATIVE_ODDS) {
+        next = { num: prev.num, mode: prev.mode === 'm' ? 'd' : 'm' };
+      } else {
+        const dir = rnd(20, n, 0) < 0.5 ? -1 : 1;
+        const num = ((prev.num - 1 + dir + 12) % 12) + 1;
+        if (wheelDist(num, home.num) <= MAX_KEY_DRIFT) next = { num, mode: prev.mode };
+      }
+    }
+    return next;
+  });
+}
+function keyAtBar(bar) { return keyAtPhrase(Math.floor(bar / BARS_PER_PHRASE)); }
+function scaleAtBar(bar) {
+  const k = keyAtBar(bar);
+  const minorScale = scaleFlavorFor(songAtBar(bar));
+  return { root: rootOf(k.num, k.mode), steps: k.mode === 'm' ? minorScale : MAJOR_SCALE, key: k };
+}
+
+const CHORD_LOOP_TEMPLATES = _preset.chordLoopTemplates;
+const CHORD_LOOP_BAR_LEN = _preset.chordLoopBarLen;
+const _chordLoops = {};
+function chordLoopFor(song) {
+  if (_chordLoops[song]) return _chordLoops[song];
+  return _chordLoops[song] = weightedChoice(48, 0, 0, song, CHORD_LOOP_TEMPLATES).degs;
+}
+function chordDegreeAt(bar) {
+  const loop = chordLoopFor(songAtBar(bar));
+  return loop[Math.floor(bar / CHORD_LOOP_BAR_LEN) % loop.length];
+}
+
+function logKeySchedule(phrases) {
+  const secsPerPhrase = BARS_PER_PHRASE * (240 / BPM);
+  const out = ['key ' + keyName(KEY_ORIGIN) + ' - schedule for the next ' +
+               (phrases * secsPerPhrase / 60).toFixed(0) + ' min:'];
+  let prev = null;
+  for (let p = 0; p < phrases; p++) {
+    const k = keyAtPhrase(p);
+    if (!prev || k.num !== prev.num || k.mode !== prev.mode) {
+      const mins = p * secsPerPhrase / 60;
+      out.push('  ' + mins.toFixed(1) + ' min  ' + keyName(k) +
+               (prev ? '  (' + wheelDist(k.num, KEY_ORIGIN.num) + ' fifths from home)' : '  START'));
+      prev = k;
+    }
+  }
+  if (out.length === 1) out.push('  no key changes in this window - as intended');
+  console.log(out.join('\n'));
+}
+logKeySchedule(300);
+
+function logRiskCaps() {
+  const loPhrases = dropPhraseTarget(DROP_BARS, 0), hiPhrases = dropPhraseTarget(DROP_BARS, 1);
+  const loBars = loPhrases * BARS_PER_PHRASE, hiBars = hiPhrases * BARS_PER_PHRASE;
+  console.log('@ ' + MODE + ' ' + BPM + 'bpm: breakdown runs ' + loBars + '-' + hiBars +
+    ' bars (' + (loBars * SECS_PER_BAR / 60).toFixed(1) + '-' + (hiBars * SECS_PER_BAR / 60).toFixed(1) +
+    ' min, centered on the researched ' + DROP_BARS + ')');
+}
+logRiskCaps();
+
+const DRIFT_CHANCE = 0.5, MAX_DRIFT = 3;
+const PROFILE_DRIFT_CHANCE = 0.20, PROFILE_DRIFT_AMOUNT = 0.05, PROFILE_DRIFT_BAND = 0.25;
+
+function makeSkeleton(vi, profile, drift, restBase, steps) {
+  const len = profile.length;
+  const maxDrift = Math.max(1, Math.min(MAX_DRIFT, Math.floor(len / 3)));
+  const orig = profile.map((p, s) => rnd(0, vi * 997 + s, 0) < p);
+  if (!orig.some(Boolean)) {
+    const peak = Math.max.apply(null, profile);
+    const strong = [];
+    profile.forEach((p, s) => { if (p >= peak / 2) strong.push(s); });
+    orig[strong[Math.floor(rnd(22, vi, 0) * strong.length) % strong.length]] = true;
+  }
+
+  const _profiles = [profile.slice()];
+  function profileAt(sec) {
+    return growChain(_profiles, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(26, vi, n) < PROFILE_DRIFT_CHANCE * drift) {
+        const step = Math.floor(rnd(27, vi, n) * len) % len;
+        const dir = rnd(28, vi * 997 + step, n) < 0.5 ? -1 : 1;
+        const base = profile[step];
+        const lo = Math.max(0, base - PROFILE_DRIFT_BAND);
+        const hi = Math.min(1, base + PROFILE_DRIFT_BAND);
+        const nudged = Math.max(lo, Math.min(hi, prev[step] + dir * PROFILE_DRIFT_AMOUNT));
+        if (nudged !== prev[step]) { next = prev.slice(); next[step] = nudged; }
+      }
+      return next;
+    });
+  }
+
+  const _chains = [orig];
+  function skelAt(sec) {
+    return growChain(_chains, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(8, vi, n) < DRIFT_CHANCE * drift) {
+        const step = Math.floor(rnd(9, vi, n) * len) % len;
+        const val = rnd(10, vi * 997 + step, n) < profileAt(n)[step];
+        if (val !== prev[step]) {
+          const cand = prev.slice(); cand[step] = val;
+          let d = 0;
+          for (let i = 0; i < len; i++) if (cand[i] !== orig[i]) d++;
+          if (d <= maxDrift) next = cand;
+        }
+      }
+      return next;
+    });
+  }
+
+  const restChance = Math.max(0, Math.min(0.75, restBase * SPARSE));
+  const maxRestStreak = Math.max(1, Math.ceil(REST_CAP_MULT / (1 - restChance)));
+  const _restsChain = [];
+  function restsAtSection(sec) {
+    return growChain(_restsChain, sec, arr => {
+      const n = arr.length;
+      let streak = 0;
+      for (let i = n - 1; i >= 0 && arr[i]; i--) streak++;
+      const forced = streak >= maxRestStreak;
+      return !forced && rnd(23, vi, n) < restChance;
+    });
+  }
+  const secOf = bar => Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const idxAt = (step, bar) => (bar * steps + step) % len;
+  return {
+    hitAt: (step, bar) => skelAt(secOf(bar))[idxAt(step, bar)],
+    restsAt: bar => restChance > 0 && restsAtSection(secOf(bar)),
+    isPickup: (step, bar) => skelAt(secOf(bar))[(idxAt(step, bar) + 1) % len],
+    secOf, idxAt,
+  };
+}
+
+const HIT_HI = 0.97, HIT_LO = 0.02;
+function stepProfile(hits, steps) {
+  return Array.from({ length: steps }, (_, i) => hits.indexOf(i) >= 0 ? HIT_HI : HIT_LO);
+}
+
+const MAX_GHOST = 0.35, WANDER_LO = 0.15, WANDER_HI = 0.85;
+const PICKUP_BIAS = 1.70, PICKUP_ELSE = 0.72;
+function ghostChance(ghostAmt, st, isPickup) {
+  const w = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
+  return w * MAX_GHOST * ghostAmt * (isPickup ? PICKUP_BIAS : PICKUP_ELSE);
+}
+
+function isPhraseEndBar(bar) { return bar % BARS_PER_PHRASE === BARS_PER_PHRASE - 1; }
+function phraseEndBoost(bar, boost) { return isPhraseEndBar(bar) ? boost : 1; }
+
+function nudgeSec(ms) { return (ms / 1000) / SECS_PER_BAR; }
+function applyNudge(pat, ms) { return !ms ? pat : pat.late(nudgeSec(ms)); }
+
+const BASS808_PATTERN = _preset.bass808Pattern;
+const BASS808_HITS = Array.from({ length: STEPS }, (_, i) => BASS808_PATTERN.indexOf(i) >= 0);
+const BASS808_PROFILE = stepProfile(BASS808_PATTERN, STEPS);
+const BASS808_OCTAVE = _preset.bass808Octave;
+const BASS808_DRIFT = _preset.bass808Drift;
+const BASS808_REST = _preset.bass808Rest;
+const BASS808_CHOICES = _preset.bass808Choices;
+const BASS808_CHOICES_END = _preset.bass808ChoicesEnd;
+
+const bass808Skel = makeSkeleton(0, BASS808_PROFILE, BASS808_DRIFT, BASS808_REST, STEPS);
+
+function bass808Pattern() {
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (st.drop) return false;
+    if (bass808Skel.restsAt(bar)) return false;
+    return bass808Skel.hitAt(step, bar);
+  }).segment(STEPS);
+
+  const noteSig = sig(t => {
+    const [step, bar] = stepBar(t);
+    const sc = scaleAtBar(bar);
+    const choices = isPhraseEndBar(bar) ? BASS808_CHOICES_END : BASS808_CHOICES;
+    const c = weightedChoice(21, 0, step, bass808Skel.secOf(bar), choices);
+    const chordDeg = chordDegreeAt(bar);
+    return BASS808_OCTAVE + sc.root + sc.steps[(c.idx + chordDeg) % 7] + 12 * c.oct;
+  }).segment(STEPS);
+
+  const velSig = sig(t => {
+    const [step, bar] = stepBar(t);
+    return 0.75 + rnd(2, step, bar) * 0.20;
+  }).segment(STEPS);
+
+  const clipSig = sig(t => {
+    const [step, bar] = stepBar(t);
+    let dist = 1;
+    for (let k = 1; k <= STEPS; k++) {
+      const s2 = (step + k) % STEPS, b2 = bar + Math.floor((step + k) / STEPS);
+      if (bass808Skel.hitAt(s2, b2)) { dist = k; break; }
+    }
+    return dist * 0.95;
+  }).segment(STEPS);
+
+  return note(noteSig).struct(gate).velocity(velSig).clip(clipSig);
+}
+
+const KICK_REINFORCE = _preset.kickReinforce;
+const KICK_REINFORCE_DRIFT = _preset.kickReinforceDrift;
+const KICK_GHOST = _preset.kickGhost;
+const KICK_BEAT1_CHANCE = _preset.kickBeat1Chance;
+const KICK_FILL_BOOST = _preset.kickFillBoost;
+const KICK_DROPS_OUT = _preset.kickDropsOut;
+const _kickBeat1 = {};
+function kickHasBeat1(song) {
+  if (_kickBeat1[song] !== undefined) return _kickBeat1[song];
+  return _kickBeat1[song] = rnd(45, song, 0) < KICK_BEAT1_CHANCE;
+}
+const KICK_REINFORCE_PROFILE = BASS808_HITS.map(isHit => isHit ? KICK_REINFORCE : HIT_LO);
+const kickSkel = makeSkeleton(1, KICK_REINFORCE_PROFILE, KICK_REINFORCE_DRIFT, 0, STEPS);
+
+function kickPattern() {
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (KICK_DROPS_OUT && st.drop) return false;
+    if (step === 0 && kickHasBeat1(songAtBar(bar))) return true;
+    if (kickSkel.hitAt(step, bar)) return true;
+    const ghostChance2 = KICK_GHOST * phraseEndBoost(bar, KICK_FILL_BOOST) * efrac(st);
+    if (!BASS808_HITS[step] && rnd(1, step, bar) < ghostChance2) return true;
+    return false;
+  }).segment(STEPS);
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    return (step === 0 || kickSkel.hitAt(step, bar))
+      ? 0.85 + rnd(2, step, bar) * 0.10
+      : 0.55 + rnd(3, step, bar) * 0.15;
+  }).segment(STEPS);
+  return note(36).struct(gate).velocity(vel);
+}
+
+const SNARE_PATTERN = _preset.snarePattern;
+const SNARE_PROFILE = stepProfile(SNARE_PATTERN, STEPS);
+const SNARE_DRIFT = _preset.snareDrift;
+const SNARE_REST = _preset.snareRest;
+const SNARE_GHOST = _preset.snareGhost;
+const SNARE_FILL_BOOST = _preset.snareFillBoost;
+const SNARE_NUDGE_MS = _preset.snareNudgeMs;
+const snareSkel = makeSkeleton(2, SNARE_PROFILE, SNARE_DRIFT, SNARE_REST, STEPS);
+
+function snarePattern() {
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (KICK_DROPS_OUT && st.drop) return false;
+    if (snareSkel.restsAt(bar)) return false;
+    if (snareSkel.hitAt(step, bar)) return true;
+    if (step === 0 && KICK_BEAT1_CHANCE === 0) return false; // one-drop: beat 1 forbidden, not just atypical - kick+snare are one unit
+    const ghostAmt = SNARE_GHOST * phraseEndBoost(bar, SNARE_FILL_BOOST);
+    return rnd(1, step, bar) < ghostChance(ghostAmt, st, snareSkel.isPickup(step, bar));
+  }).segment(STEPS);
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    return snareSkel.hitAt(step, bar)
+      ? 0.82 + rnd(2, step, bar) * 0.13
+      : 0.35 + rnd(3, step, bar) * 0.20;
+  }).segment(STEPS);
+  return applyNudge(note(39).struct(gate).velocity(vel), SNARE_NUDGE_MS);
+}
+
+const ROLL_ON = _preset.rollOn;
+const HAT_BASE_SUBSTEPS = _preset.hatBaseSubsteps;
+const ROLL_BASE_CHANCE = _preset.rollBaseChance;
+const ROLL_PHRASE_END_MULT = _preset.rollPhraseEndMult;
+const ROLL_LENGTHS = _preset.rollLengths;
+
+function rollSubsteps(n) {
+  if (n === 6) return [0, 1, 2, 4, 5, 6];
+  return Array.from({ length: n }, (_, i) => i);
+}
+function rollAt(bar, beatIdx, maxLen) {
+  if (!ROLL_ON) return null;
+  const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+  const boost = beatIdx >= 2 ? phraseEndBoost(bar, ROLL_PHRASE_END_MULT) : 1;
+  const chance = ROLL_BASE_CHANCE * boost * (0.5 + efrac(st) * 0.5);
+  if (rnd(40, bar, beatIdx) >= chance) return null;
+  const valid = ROLL_LENGTHS.filter(o => o.n <= maxLen);
+  if (!valid.length) return null;
+  const totalW = valid.reduce((a, o) => a + o.w, 0);
+  const roll = rnd(41, bar, beatIdx) * totalW;
+  let acc = 0;
+  for (const opt of valid) { acc += opt.w; if (roll < acc) return opt.n; }
+  return valid[valid.length - 1].n;
+}
+
+const _rollSchedules = {};
+function rollScheduleFor(bar) {
+  if (_rollSchedules[bar]) return _rollSchedules[bar];
+  const windows = [];
+  let beatIdx = 0;
+  while (beatIdx < 4) {
+    const maxLen = (4 - beatIdx) * 8;
+    const n = rollAt(bar, beatIdx, maxLen);
+    if (n) { windows.push({ start: beatIdx * 8, n }); beatIdx += Math.ceil(n / 8); }
+    else beatIdx += 1;
+  }
+  return _rollSchedules[bar] = windows;
+}
+function rollWindowAt(bar, sub) {
+  for (const w of rollScheduleFor(bar)) if (sub >= w.start && sub < w.start + w.n) return w;
+  return null;
+}
+
+function hatPattern() {
+  const gate = sig(t => {
+    const [sub, bar] = stepBar(t, HAT_STEPS);
+    const w = rollWindowAt(bar, sub);
+    if (w) return rollSubsteps(w.n).indexOf(sub - w.start) >= 0;
+    return HAT_BASE_SUBSTEPS.indexOf(sub % 8) >= 0;
+  }).segment(HAT_STEPS);
+
+  const vel = sig(t => {
+    const [sub, bar] = stepBar(t, HAT_STEPS);
+    const w = rollWindowAt(bar, sub);
+    if (w) {
+      const active = rollSubsteps(w.n);
+      const pos = active.indexOf(sub - w.start);
+      const frac = pos / Math.max(1, active.length - 1);
+      return 0.45 + frac * 0.50 + rnd(2, sub, bar) * 0.05;
+    }
+    const inBeat = sub % 8;
+    const accent = inBeat === 0 ? 1.0 : 0.7;
+    return (0.55 + rnd(2, sub, bar) * 0.15) * accent;
+  }).segment(HAT_STEPS);
+
+  return note(42).struct(gate).velocity(vel);
+}
+
+const MOTIF_ON = _preset.motifOn;
+const MOTIF_CHORD = [0, 2, 4];
+const MOTIF_POS = [0, 4, 6, 8, 12, 14];
+const MOTIF_STRONG = [0, 8];
+const MOTIF_N_LO = _preset.motifNoteRange[0], MOTIF_N_HI = _preset.motifNoteRange[1];
+const MOTIF_CYCLE = _preset.motifCycle;
+const MOTIF_OCTAVE = _preset.motifOctave;
+const MOTIF_CLIP = _preset.motifClip;
+
+function motifSpread(total, moves, id, salt) {
+  const out = new Array(moves).fill(1);
+  let extra = total - moves;
+  for (let k = 0; extra > 0 && k < 50; k++) {
+    const i = Math.floor(rnd(40 + salt, id * 7 + k, 0) * moves);
+    if (out[i] < 3) { out[i]++; extra--; }
+  }
+  return out;
+}
+function motifChordTone(target, lo, hi) {
+  let best = null, bd = 99;
+  for (let o = -2; o <= 3; o++) for (const c of MOTIF_CHORD) {
+    const v = c + o * 7;
+    if (v < lo || v > hi) continue;
+    const d = Math.abs(v - target);
+    if (d < bd) { bd = d; best = v; }
+  }
+  return best === null ? target : best;
+}
+const _motifs = {};
+function motifFor(id) {
+  if (_motifs[id]) return _motifs[id];
+  const n = MOTIF_N_LO + Math.floor(rnd(30, id, 0) * (MOTIF_N_HI - MOTIF_N_LO + 1));
+  const peakLo = Math.floor((n - 1) / 2) + 1;
+  const peakHi = n - 2;
+  const peakIdx = peakHi >= peakLo
+    ? peakLo + Math.floor(rnd(31, id, 0) * (peakHi - peakLo + 1))
+    : Math.max(1, peakHi);
+  const riseMoves = peakIdx, fallMoves = n - 1 - peakIdx;
+  const start = MOTIF_CHORD[Math.floor(rnd(32, id, 0) * MOTIF_CHORD.length)];
+  const rise = riseMoves + Math.floor(rnd(33, id, 0) * 3);
+  const peak = start + rise;
+  const endTarget = peak - (fallMoves + Math.floor(rnd(34, id, 0) * 3));
+  const end = fallMoves > 0 ? motifChordTone(endTarget, start - 4, peak - 1) : peak;
+
+  const degs = [start];
+  motifSpread(rise, riseMoves, id, 0).forEach(m => degs.push(degs[degs.length - 1] + m));
+  if (fallMoves > 0) {
+    motifSpread(Math.max(peak - end, fallMoves), fallMoves, id, 5)
+      .forEach(m => degs.push(degs[degs.length - 1] - m));
+    degs[degs.length - 1] = end;
+  }
+  const pool = MOTIF_POS.slice(1), chosen = [0];
+  for (let i = 0; i < n - 1; i++) {
+    let p = pool[Math.floor(rnd(35, id, i) * pool.length)], guard = 0;
+    while (chosen.indexOf(p) >= 0 && guard++ < 12) p = pool[Math.floor(rnd(36, id, i * 13 + guard) * pool.length)];
+    if (chosen.indexOf(p) < 0) chosen.push(p);
+  }
+  chosen.sort((a, b) => a - b);
+  while (chosen.length < degs.length) degs.pop();
+  if (peakIdx < chosen.length) {
+    let best = chosen[peakIdx], bd = 99;
+    for (const stp of MOTIF_STRONG) {
+      if (chosen.indexOf(stp) >= 0 && stp !== chosen[peakIdx]) continue;
+      const prev = peakIdx > 0 ? chosen[peakIdx - 1] : -1;
+      const nxt = peakIdx + 1 < chosen.length ? chosen[peakIdx + 1] : 99;
+      const d = Math.abs(stp - chosen[peakIdx]);
+      if (stp > prev && stp < nxt && d < bd) { bd = d; best = stp; }
+    }
+    chosen[peakIdx] = best;
+  }
+  let d2 = degs.slice(0, chosen.length);
+  const top = Math.max.apply(null, d2);
+  if (top > 6) { const sh = top - 6; d2 = d2.map(x => x - sh); }
+  const bot = Math.min.apply(null, d2);
+  if (bot < 0) d2 = d2.map(x => x - bot);
+  _motifs[id] = { steps: chosen, degs: d2 };
+  return _motifs[id];
+}
+function motifNoteAt(step, bar) {
+  if (!MOTIF_ON) return null;
+  const inCycle = ((bar % MOTIF_CYCLE) + MOTIF_CYCLE) % MOTIF_CYCLE;
+  if (inCycle > 1) return null;
+  const sec = Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const m = motifFor(songAtBar(bar) * 977 + sec);
+  const pos = inCycle * STEPS + step;
+  const i = m.steps.indexOf(pos);
+  if (i < 0) return null;
+  const statement = Math.floor(bar / MOTIF_CYCLE);
+  let deg = m.degs[i];
+  if (statement % 2 === 1 && i === m.degs.length - 1) deg = motifChordTone(deg - 2, 0, 6);
+  return deg;
+}
+
+function motifPattern() {
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    return motifNoteAt(step, bar) !== null;
+  }).segment(STEPS);
+  const noteSig = sig(t => {
+    const [step, bar] = stepBar(t);
+    const sc = scaleAtBar(bar);
+    const noteDeg = motifNoteAt(step, bar);
+    const d = noteDeg === null ? 0 : noteDeg;
+    const o = Math.floor(d / 7), ix = ((d % 7) + 7) % 7;
+    const chordDeg = chordDegreeAt(bar);
+    return MOTIF_OCTAVE + sc.root + sc.steps[(ix + chordDeg) % 7] + 12 * o;
+  }).segment(STEPS);
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    return 0.60 + rnd(2, step, bar) * 0.20;
+  }).segment(STEPS);
+  return note(noteSig).struct(gate).velocity(vel).clip(MOTIF_CLIP);
+}
+
+const SKANK_ON = _preset.skankOn;
+const SKANK_PATTERN = _preset.skankPattern;
+const SKANK_PROFILE = stepProfile(SKANK_PATTERN, STEPS);
+const SKANK_DRIFT = _preset.skankDrift;
+const SKANK_REST = _preset.skankRest;
+const SKANK_OCTAVE = _preset.skankOctave;
+const SKANK_CLIP = _preset.skankClip;
+const SKANK_GHOST = _preset.skankGhost;
+const SKANK_CHORD_TONES = [0, 2, 4];
+const SKANK_VI = 3;
+const skankSkel = makeSkeleton(SKANK_VI, SKANK_PROFILE, SKANK_DRIFT, SKANK_REST, STEPS);
+
+function skankPattern() {
+  const gate = sig(t => {
+    if (!SKANK_ON) return false;
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (skankSkel.restsAt(bar)) return false;
+    if (skankSkel.hitAt(step, bar)) return true;
+    return rnd(1, SKANK_VI * 997 + step, bar) < ghostChance(SKANK_GHOST, st, skankSkel.isPickup(step, bar));
+  }).segment(STEPS);
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    return skankSkel.hitAt(step, bar)
+      ? 0.55 + rnd(2, SKANK_VI * 997 + step, bar) * 0.20
+      : 0.30 + rnd(3, SKANK_VI * 997 + step, bar) * 0.15;
+  }).segment(STEPS);
+  const layers = SKANK_CHORD_TONES.map(idx => {
+    const noteSig = sig(t => {
+      const bar = Math.floor(t);
+      const sc = scaleAtBar(bar);
+      const chordDeg = chordDegreeAt(bar);
+      return SKANK_OCTAVE + sc.root + sc.steps[(idx + chordDeg) % 7];
+    }).segment(STEPS);
+    return note(noteSig).struct(gate).velocity(vel).clip(SKANK_CLIP);
+  });
+  return stack.apply(null, layers);
+}
+
+const withSwing = p => SWING > 0 ? p.swingBy(SWING, SWING_GRID) : p;
+stack(
+  withSwing(stack(kickPattern(), snarePattern(), hatPattern())).midichan(drumChan),
+  withSwing(bass808Pattern()).midichan(bass808Chan),
+  withSwing(motifPattern()).midichan(leadChan),
+  withSwing(skankPattern()).midichan(skankChan)
+).midi(midi)
