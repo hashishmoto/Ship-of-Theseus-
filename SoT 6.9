@@ -1,0 +1,900 @@
+// SHIP OF THESEUS - live, NO VOICE fork - v69
+const midi = 'IAC Driver Bus 1';
+
+const SEED          = 420;   // set: 1-100
+const OPEN_KEY      = '9m';  // set: 1m-12m | 1d-12d
+
+//    | downtempo/98-105  | dubtechno/115-125 | house/120-125     | minimal/120-125   |
+//    | techno/125-135    | trance/132-140    | psy/125-150       | custom/60-180     |
+const MODE = 'house';
+const BPM = 123;
+const BPM_RAMP_SECONDS = 8;   // set: 0-30
+
+
+
+if (typeof setcpm !== 'undefined') {
+  const _tempo = (globalThis.__sotTempo = globalThis.__sotTempo || { bpm: undefined, timer: null });
+  if (_tempo.timer) { clearInterval(_tempo.timer); _tempo.timer = null; }
+  if (_tempo.bpm === undefined || BPM_RAMP_SECONDS <= 0 || _tempo.bpm === BPM) {
+    _tempo.bpm = BPM;
+    setcpm(BPM / 4);
+  } else {
+    const fromBpm = _tempo.bpm, toBpm = BPM, stepMs = 100;
+    const steps = Math.max(1, Math.round(BPM_RAMP_SECONDS * 1000 / stepMs));
+    let step = 0;
+    _tempo.timer = setInterval(() => {
+      step += 1;
+      const t = Math.min(1, step / steps);
+      _tempo.bpm = fromBpm + (toBpm - fromBpm) * t;
+      setcpm(_tempo.bpm / 4);
+      if (t >= 1) { clearInterval(_tempo.timer); _tempo.timer = null; }
+    }, stepMs);
+  }
+}
+
+
+const MODE_OVERRIDES = {};
+
+const MODE_PRESETS = {
+  techno:  { kickPattern: '4x4', kickGhost: 0, kickHuman: false, hatDrift: 0.50, hatGhost: 0.50, kitDriftScale: 0.50, kitGhostScale: 0.50, climbLo: 0.70, climbHi: 1.70, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0.30, hatHuman: false, kickVelLo: 0.89, kickVelHi: 1.00, stabInclude: 0.5, padInclude: 0.5, motifInclude: 0.5, harmonyMinCount: 2, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'phrygian',  hatRoll: 0, swingPct: 50, swingGrid: 8, bassPattern: 'roll16',     bassClip: 1,   sparse: 1,   motifCycle: 3, motifOn: true,  stabOn: true,  padOn: true, stabChordTones: [0,2,4], maxOptional: 2, hatOpenPattern: 'offbeat', keyMoveChance: 0.05, songMinutes: 7.6, padChordTones: [0,2,4], bassChoices: 'techno', optionalInclude: { snare: 0.35, ride: 0.3, lowtom: 0.4, midtom: 0.35, crash: 0.45, shaker: 0.45 }, sectionSeconds: 59, motifNoteRange: [3,7], kickDropsOut: true, dropPatience: 25, dropBars: 8, stabRest: 0.2, stabClip: 0.60, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [0,0] },
+  minimal: { kickPattern: '4x4', kickGhost: 0.12, kickHuman: true, hatDrift: 1.00, hatGhost: 1.00, kitDriftScale: 1.00, kitGhostScale: 1.00, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: true, kickVelLo: 0.70, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 1, swingPct: 55, swingGrid: 8, bassPattern: 'syncopated', bassClip: 0.40, sparse: 1.6, motifCycle: 2, motifOn: false, stabOn: false, padOn: false, stabChordTones: [0,2,4], maxOptional: 1, hatOpenPattern: null, keyMoveChance: 0.05, songMinutes: 8.1, padChordTones: [0,2,4], bassChoices: 'drone', optionalInclude: { snare: 0.3, ride: 0.05, lowtom: 0.05, midtom: 0.05, crash: 0.05, shaker: 0.5 }, sectionSeconds: 63, motifNoteRange: [3,7], kickDropsOut: false, dropPatience: 25, dropBars: 6, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.20, stabDrift: 0.20, rimInclude: 0.20, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 12, hatNudgeMs: [-4,10] },
+  psy:     { kickPattern: '4x4', kickGhost: 0, kickHuman: false, hatDrift: 0.20, hatGhost: 0.20, kitDriftScale: 0.20, kitGhostScale: 0.20, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: false, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: false,     clapPattern: 'backbeat', scaleMode: 'harmonic', hatRoll: 1, swingPct: 50, swingGrid: 8, bassPattern: 'roll16',     bassClip: 0.85, sparse: 0.6, motifCycle: 2, motifOn: true,  stabOn: false, padOn: true, stabChordTones: [0,2,4], maxOptional: 3, hatOpenPattern: 'offbeat', keyMoveChance: 0.03, songMinutes: 9.0, padChordTones: [0,2,4], bassChoices: 'psy', optionalInclude: { snare: 0.5, ride: 0.35, lowtom: 0.0, midtom: 0.0, crash: 0.25, shaker: 0.7 }, sectionSeconds: 54, motifNoteRange: [6,10], kickDropsOut: true, dropPatience: 10, dropBars: 16, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [0,0] },
+  house:   { kickPattern: '4x4', kickGhost: 0.25, kickHuman: true, hatDrift: 1.00, hatGhost: 1.00, kitDriftScale: 1.00, kitGhostScale: 1.00, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 1, swingPct: 54, swingGrid: 8, bassPattern: 'syncopated', bassClip: 0.8, sparse: 1,   motifCycle: 3, motifOn: true,  stabOn: true,  padOn: false, stabChordTones: [0,2,4,6], maxOptional: 3, hatOpenPattern: 'lift',    keyMoveChance: 0.05, songMinutes: 6.8, padChordTones: [0,2,4], bassChoices: 'default', optionalInclude: { snare: 0.3, ride: 0.45, lowtom: 0.25, midtom: 0.25, crash: 0.35, shaker: 0.80 }, sectionSeconds: 63, motifNoteRange: [3,7], kickDropsOut: true, dropPatience: 8, dropBars: 12, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 8, hatNudgeMs: [-2,5] },
+  trance:  { kickPattern: '4x4', kickGhost: 0, kickHuman: false, hatDrift: 0.50, hatGhost: 0.50, kitDriftScale: 0.50, kitGhostScale: 0.50, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0.35, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 0.80, padInclude: 1.00, motifInclude: 0.80, harmonyMinCount: 0, kitDropsOut: true, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'harmonic', hatRoll: 1, swingPct: 50, swingGrid: 8, bassPattern: 'roll16',     bassClip: 0.85, sparse: 0.8, motifCycle: 4, motifOn: true,  stabOn: true,  padOn: true, stabChordTones: [0,2,4], maxOptional: 2, hatOpenPattern: 'offbeat', keyMoveChance: 0.20, songMinutes: 6.9, padChordTones: [0,4], bassChoices: 'default', optionalInclude: { snare: 0.55, ride: 0.3, lowtom: 0.3, midtom: 0.3, crash: 0.6, shaker: 0.3 }, sectionSeconds: 56, motifNoteRange: [4,8], kickDropsOut: true, dropPatience: 20, dropBars: 16, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [-2,3] },
+  dubtechno: { kickPattern: '4x4', kickGhost: 0, kickHuman: false, hatDrift: 0.20, hatGhost: 0.20, kitDriftScale: 0.20, kitGhostScale: 0.20, climbLo: 0.45, climbHi: 1.80, kitVelLo: 0.55, kitVelHi: 0.75, postDropBoost: 0, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'none',     scaleMode: 'natural',  hatRoll: 0, swingPct: 50, swingGrid: 8, bassPattern: 'offbeat',    bassClip: 0.40,   sparse: 1.8, motifCycle: 2, motifOn: false, stabOn: true,  padOn: false, stabChordTones: [0,2,4,6], maxOptional: 1, hatOpenPattern: 'offbeat', keyMoveChance: 0.03, songMinutes: 10.0, padChordTones: [0,2,4], bassChoices: 'dubtechno', optionalInclude: { snare: 0.1, ride: 0.15, lowtom: 0.15, midtom: 0.1, crash: 0.15, shaker: 0.2 }, sectionSeconds: 64, motifNoteRange: [3,7], kickDropsOut: false, dropPatience: 35, dropBars: 4, stabRest: 0.07, stabClip: 0.40, bassDrift: 0.20, stabDrift: 0.10, rimInclude: 0.15, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [0,0] },
+  custom:  { kickPattern: '4x4', kickGhost: 0.25, kickHuman: true, hatDrift: 1.00, hatGhost: 1.00, kitDriftScale: 1.00, kitGhostScale: 1.00, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 0, swingPct: 56, swingGrid: 8, bassPattern: 'roll16',     bassClip: 1,   sparse: 1,   motifCycle: 3, motifOn: true,  stabOn: true,  padOn: false, stabChordTones: [0,2,4], maxOptional: 2, hatOpenPattern: null, keyMoveChance: 0.10, songMinutes: 26.0, padChordTones: [0,2,4], bassChoices: 'default', optionalInclude: { snare: 0.35, ride: 0.45, lowtom: 0.45, midtom: 0.4, crash: 0.5, shaker: 0.4 }, sectionSeconds: 32, motifNoteRange: [3,7], kickDropsOut: true, dropPatience: 15, dropBars: 6, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [0,0] },
+  downtempo: { kickPattern: '4x4', kickGhost: 0.25, kickHuman: true, hatDrift: 1.00, hatGhost: 1.00, kitDriftScale: 1.00, kitGhostScale: 1.00, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,   clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 1, swingPct: 56, swingGrid: 16, bassPattern: 'offbeat',    bassClip: 0.65, sparse: 1.2, motifCycle: 2, motifOn: false, stabOn: false, padOn: false, stabChordTones: [0,2,4], maxOptional: 2, hatOpenPattern: 'offbeat', keyMoveChance: 0.10, songMinutes: 7.0, padChordTones: [0,2,4], bassChoices: 'drone', optionalInclude: { snare: 0.15, ride: 0.05, lowtom: 0.1, midtom: 0.1, crash: 0.15, shaker: 0.65 }, sectionSeconds: 38, motifNoteRange: [3,7], kickDropsOut: true, dropPatience: 20, dropBars: 16, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: true, pluckPattern: 'offsync', percOn: true, percPattern: 'threeFour', snareNudgeMs: 10, hatNudgeMs: [-3,6] },
+};
+
+const _preset = { ...(MODE_PRESETS[MODE] || MODE_PRESETS.techno), ...MODE_OVERRIDES };
+const KICK_PATTERN = _preset.kickPattern;   // see KICK_PATTERNS below for the full list
+const CLAP_PATTERN = _preset.clapPattern;   // see CLAP_PATTERNS below
+const SCALE_MODE   = _preset.scaleMode;     // 'natural', 'harmonic' (raised 7th, Goa flavor), or 'phrygian' (v40, flat 2nd, techno)
+const HAT_ROLL     = _preset.hatRoll;       // 0 = accented pattern, 1 = dense rolling 16ths
+const SWING_PCT    = _preset.swingPct;      // 50 = straight, 62 = heavy
+const SWING_GRID   = _preset.swingGrid;     // 8 = shuffles the ghosts, 4 = shuffles the hats
+const BASS_PATTERN = _preset.bassPattern;   // see BASS_PATTERNS below - a rhythmic shape, not a density dial
+const BASS_CHOICES_NAME = _preset.bassChoices; // 'default', 'drone', 'dubtechno' (v24), or 'techno' (v34) - see BASS_CHOICE_SETS below (resolved there, not here, since it's defined later)
+const KICK_DROPS_OUT = _preset.kickDropsOut;
+const OPTIONAL_INCLUDE = _preset.optionalInclude;
+const BASS_CLIP    = _preset.bassClip;      // note length, shorter = more room for the kick
+const SPARSE       = _preset.sparse;        // how much voices sit out. 0 = nobody rests
+const MOTIF_CYCLE  = _preset.motifCycle;
+const MOTIF_ON       = _preset.motifOn;       // does this genre want the arch-lead at all - see MODE_PRESETS above
+const STAB_ON        = _preset.stabOn;        // does this genre want chord stabs at all - see MODE_PRESETS above
+const STAB_CHORD_TONES = _preset.stabChordTones; // [0,2,4]=triad, [0,2,4,6]=adds the 7th - see "-- chord --" below
+const PAD_ON         = _preset.padOn;         // does this genre want the sustained pad at all - see MODE_PRESETS above
+const PAD_CHORD_TONES = _preset.padChordTones; // [0,2,4]=full triad, [0,4]=root+5th only - see "-- pad --" below
+const STAB_INCLUDE_PRESET = _preset.stabInclude;
+const PAD_INCLUDE_PRESET = _preset.padInclude;
+const MOTIF_INCLUDE_PRESET = _preset.motifInclude;
+const HARMONY_VOICE_NAMES = ['motif', 'stab', 'pad'];
+const HARMONY_MIN_COUNT = _preset.harmonyMinCount;
+const KIT_DROPS_OUT_PRESET = _preset.kitDropsOut;
+const BASS_DROPS_OUT_PRESET = _preset.bassDropsOut;
+const MAX_OPTIONAL   = _preset.maxOptional;   // kit size on top of the core - see MODE_PRESETS above (was a top-level dial, now mode-driven)
+const DROP_PATIENCE  = _preset.dropPatience;  // breakdown character (frequent/dramatic vs. rare/gradual) - see dropPatience note above MODE_PRESETS (was a top-level dial, now mode-driven)
+const DROP_BARS      = _preset.dropBars;
+const STAB_REST = _preset.stabRest;
+const BASS_DRIFT_PRESET = _preset.bassDrift;
+const STAB_DRIFT_PRESET = _preset.stabDrift;
+const RIM_INCLUDE = _preset.rimInclude;
+const HAT_DRIFT_PRESET = _preset.hatDrift;
+const HAT_GHOST_PRESET = _preset.hatGhost;
+const KIT_DRIFT_SCALE = _preset.kitDriftScale;
+const KIT_GHOST_SCALE = _preset.kitGhostScale;
+const KIT_VEL_LO_PRESET = _preset.kitVelLo;
+const KIT_VEL_HI_PRESET = _preset.kitVelHi;
+const KICK_GHOST_PRESET = _preset.kickGhost;
+const KICK_HUMAN_PRESET = _preset.kickHuman;
+const KICK_VEL_LO = _preset.kickVelLo, KICK_VEL_HI = _preset.kickVelHi;
+const KICK_VEL_MAP = Array.from({ length: 8 }, (_, i) => KICK_VEL_LO + rnd(41, i, 0) * (KICK_VEL_HI - KICK_VEL_LO));
+const HAT_HUMAN_PRESET = _preset.hatHuman;
+const HAT_VEL_LO = 0.75, HAT_VEL_HI = 0.95; // matches SKEL_VEL_LO/HI (defined later) - kept as its own literal pair here, not a forward reference to it
+const HAT_VEL_MAP = Array.from({ length: 6 }, (_, i) => HAT_VEL_LO + rnd(42, i, 0) * (HAT_VEL_HI - HAT_VEL_LO));
+const STAB_CLIP = _preset.stabClip;
+const HAT_OPEN_PATTERN = _preset.hatOpenPattern; // null = old probabilistic accent behavior, or a HAT_OPEN_PATTERNS name for a deterministic groove (techno/house/trance/psy/downtempo/dubtechno)
+const PLUCK_ON       = _preset.pluckOn;       // does this genre want the mid-register pluck voice at all - downtempo only so far, see "-- pluck --" below
+const PLUCK_PATTERN  = _preset.pluckPattern;  // see PLUCK_PATTERNS below
+const PERC_ON        = _preset.percOn;        // does this genre want the dedicated polyrhythm-perc voice at all - downtempo only so far, see "-- perc --" below
+const PERC_PATTERN   = _preset.percPattern;   // see PERC_PATTERNS below
+const SNARE_NUDGE_MS = _preset.snareNudgeMs;
+const HAT_NUDGE_MS   = _preset.hatNudgeMs;
+
+
+const MOTIF_OCTAVE = 60;
+const MOTIF_CLIP   = 0.85;
+
+const STAB_OCTAVE = 60; // lower = darker. Keep above 59 or it fights the bass.
+
+const PAD_OCTAVE = 48;
+const PAD_CLIP   = 15;
+
+const PLUCK_OCTAVE = 48;
+const PLUCK_CLIP   = 0.35; // spec: 25-50% of a 1/16 for pluck/percussion note lengths - midpoint
+
+const PERC_NOTES = [60, 61];
+
+
+const drumChan = 1, bassChan = 2, stabChan = 3, motifChan = 5, padChan = 6;
+const BASS_OCTAVE = 36;
+const BASS_OFFBEAT  = 0.85;
+const BASS_SIXTEENTH = 0.55;
+const BASS_CHOICES = [
+  { idx: 0, oct: 0, w: 0.76 },
+  { idx: 0, oct: 1, w: 0.10 },
+  { idx: 4, oct: 0, w: 0.08 },
+  { idx: 2, oct: 0, w: 0.06 },
+];
+const BASS_CHOICES_DRONE = [
+  { idx: 0, oct: 0, w: 0.90 },
+  { idx: 0, oct: 1, w: 0.08 },
+  { idx: 4, oct: 0, w: 0.02 },
+];
+const BASS_CHOICES_DUBTECHNO = [
+  { idx: 0, oct: 0, w: 0.85 },
+  { idx: 0, oct: 1, w: 0.06 },
+  { idx: 2, oct: 0, w: 0.05 },
+  { idx: 4, oct: 0, w: 0.04 },
+];
+const BASS_CHOICES_TECHNO = [
+  { idx: 0, oct: 0, w: 0.70 },
+  { idx: 0, oct: 1, w: 0.08 },
+  { idx: 4, oct: 0, w: 0.12 },
+  { idx: 2, oct: 0, w: 0.06 },
+  { idx: 6, oct: 0, w: 0.04 },
+];
+const BASS_CHOICES_PSY = [
+  { idx: 0, oct: 0, w: 0.87 },
+  { idx: 0, oct: 1, w: 0.06 },
+  { idx: 4, oct: 0, w: 0.04 },
+  { idx: 2, oct: 0, w: 0.03 },
+];
+const BASS_CHOICE_SETS = { default: BASS_CHOICES, drone: BASS_CHOICES_DRONE, dubtechno: BASS_CHOICES_DUBTECHNO, techno: BASS_CHOICES_TECHNO, psy: BASS_CHOICES_PSY };
+const BASS_CHOICES_SET = BASS_CHOICE_SETS[BASS_CHOICES_NAME] || BASS_CHOICES;
+const E_START = 30;
+const SWING = (SWING_PCT - 50) / 50;
+
+const STEPS = 16;
+const BARS_PER_PHRASE = 4;
+
+const sig = (typeof signal !== 'undefined') ? signal : (f) => time.fmap(f);
+
+function rnd(kind, a, b) {
+  let h = (kind * 374761393 + a * 668265263 + b * 2246822519 + SEED * 3266489917) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = Math.imul(h ^ (h >>> 16), 2246822507);
+  h = h ^ (h >>> 15);
+  return (h >>> 0) / 4294967296;
+}
+
+function growChain(arr, i, step) {
+  if (!(i >= 0)) i = 0;
+  i = Math.min(i, arr.length + 4096);
+  while (arr.length <= i) arr.push(step(arr));
+  return arr[i];
+}
+
+const stepBar = t => [Math.floor(t * STEPS) % STEPS, Math.floor(t)];
+
+const E_MAX = 100;
+const CLIMB_LO = _preset.climbLo, CLIMB_HI = _preset.climbHi;
+const DROP_PATIENCE_SAFE = Math.max(-35, Math.min(45, DROP_PATIENCE));
+const DROP_LO = 40 + DROP_PATIENCE_SAFE;
+const DROP_HI = Math.max(DROP_LO + 5, Math.min(100, 90 + DROP_PATIENCE_SAFE));
+const DROP_MAX_CHANCE = 0.18;
+const DROP_COOLDOWN = 4;
+const RELEASE_LO = 0.3, RELEASE_HI = 0.6;
+
+const SECS_PER_BAR = 240 / BPM;
+const SECTION = Math.max(1, Math.round(_preset.sectionSeconds / (SECS_PER_BAR * BARS_PER_PHRASE)));
+const REST_CAP_MULT = 0.75;
+function dropPhraseTarget(bars, roll) {
+  const phrases = Math.max(1, bars / BARS_PER_PHRASE);
+  return Math.max(1, Math.round(phrases * (0.75 + roll * 0.5)));
+}
+function avgBarsPerDrop(patience, dropBars) {
+  const pSafe = Math.max(-35, Math.min(45, patience));
+  const pLo = 40 + pSafe, pHi = Math.max(pLo + 5, Math.min(100, 90 + pSafe));
+  let s = 0x9e3779b9;
+  const lcg = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  let e = E_START, cool = 0, drop = false, bar = 0, lastDropBar = -1, dropLen = 0, dropTarget = 0;
+  const gaps = [];
+  for (let n = 0; n < 5000; n++) {
+    e = Math.min(E_MAX, e + CLIMB_LO + lcg() * (CLIMB_HI - CLIMB_LO));
+    let nowDrop = false;
+    if (drop) {
+      nowDrop = dropLen <= dropTarget;
+      if (!nowDrop) cool = DROP_COOLDOWN;
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - pLo) / (pHi - pLo)));
+      if (lcg() < ramp * DROP_MAX_CHANCE) {
+        nowDrop = true;
+        dropTarget = dropPhraseTarget(dropBars, lcg());
+        e = e * (1 - (RELEASE_LO + lcg() * (RELEASE_HI - RELEASE_LO)));
+      }
+    }
+    if (nowDrop && !drop) {
+      if (lastDropBar >= 0) gaps.push(bar - lastDropBar);
+      lastDropBar = bar;
+    }
+    dropLen = nowDrop ? dropLen + 1 : 0;
+    drop = nowDrop;
+    bar += BARS_PER_PHRASE;
+  }
+  return gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : dropBars;
+}
+const SONG_DROPS = _preset.songMinutes > 0
+  ? Math.max(1, Math.round((_preset.songMinutes * 60) / (avgBarsPerDrop(DROP_PATIENCE, DROP_BARS) * SECS_PER_BAR)))
+  : 0;
+
+const POST_DROP_BOOST = _preset.postDropBoost;
+const POST_DROP_DECAY_STEP = POST_DROP_BOOST / 8;
+
+const _walk = [{ e: E_START, drop: false, cool: 0, song: 0, since: 0, dropLen: 0, dropTarget: 0, boost: 0 }];
+function phrase(i) {
+  return growChain(_walk, i, arr => {
+    const n = arr.length, p = arr[n - 1];
+    let e = Math.min(E_MAX, p.e + CLIMB_LO + rnd(4, n, 0) * (CLIMB_HI - CLIMB_LO));
+    let drop = false, cool = p.cool, song = p.song, since = p.since, dropLen = 0, dropTarget = p.dropTarget;
+    if (p.drop) {
+      dropLen = p.dropLen + 1;
+      drop = dropLen <= p.dropTarget;
+      if (!drop) cool = DROP_COOLDOWN; // just ended this phrase - cooldown starts now, not at trigger
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - DROP_LO) / (DROP_HI - DROP_LO)));
+      if (rnd(5, n, 0) < ramp * DROP_MAX_CHANCE) {
+        drop = true;
+        dropLen = 1;
+        dropTarget = dropPhraseTarget(DROP_BARS, rnd(6, n, 0));
+        e = e * (1 - (RELEASE_LO + rnd(7, n, 0) * (RELEASE_HI - RELEASE_LO)));
+        since += 1;
+        if (SONG_DROPS > 0 && since >= SONG_DROPS) { song += 1; since = 0; e = E_START; }
+      }
+    }
+    const boost = (p.drop && !drop) ? POST_DROP_BOOST
+      : drop ? 0
+      : Math.max(0, p.boost - POST_DROP_DECAY_STEP);
+    return { e, drop, cool, song, since, dropLen, dropTarget, boost };
+  });
+}
+const songAtBar = bar => phrase(Math.floor(bar / BARS_PER_PHRASE)).song;
+const efrac = st => Math.max(0, Math.min(1, (st.e - E_START) / (E_MAX - E_START) + (st.boost || 0)));
+
+
+const KEY_MOVE_CHANCE = _preset.keyMoveChance;
+const KEY_RELATIVE_ODDS = 0.25;
+const MAX_KEY_DRIFT = 2;
+
+const PITCH_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
+const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
+const HARMONIC_MINOR_SCALE = [0, 2, 3, 5, 7, 8, 11];
+const PHRYGIAN_SCALE = [0, 1, 3, 5, 7, 8, 10];
+
+function rootOf(num, mode) {
+  const base = (7 * (num - 1)) % 12;
+  return mode === 'm' ? (base + 9) % 12 : base;
+}
+function parseOpenKey(s) {
+  const m = String(s).trim().toLowerCase().match(/^(\d{1,2})([md])$/);
+  if (!m) return { num: 1, mode: 'm' };
+  return { num: Math.min(12, Math.max(1, +m[1])), mode: m[2] };
+}
+function keyName(k) {
+  return k.num + k.mode + ' (' + PITCH_NAMES[rootOf(k.num, k.mode)] + (k.mode === 'm' ? ' minor)' : ' major)');
+}
+function wheelDist(a, b) {
+  const d = Math.abs(a - b) % 12;
+  return Math.min(d, 12 - d);
+}
+
+const KEY_TYPED = parseOpenKey(OPEN_KEY);
+const NEW_SONG_KEY_DRIFT = 3;
+const _origins = {};
+function keyOriginFor(song) {
+  if (_origins[song]) return _origins[song];
+  if (song === 0) { _origins[0] = KEY_TYPED; return KEY_TYPED; }
+  const off = Math.floor(rnd(24, song, 0) * (NEW_SONG_KEY_DRIFT * 2 + 1)) - NEW_SONG_KEY_DRIFT;
+  const num = ((KEY_TYPED.num - 1 + off + 12) % 12) + 1;
+  const mode = rnd(25, song, 0) < 0.30 ? (KEY_TYPED.mode === 'm' ? 'd' : 'm') : KEY_TYPED.mode;
+  _origins[song] = { num, mode };
+  return _origins[song];
+}
+const KEY_ORIGIN = KEY_TYPED;
+const _keys = [KEY_TYPED];
+function keyAtPhrase(ph) {
+  return growChain(_keys, ph, arr => {
+    const n = arr.length, prev = arr[n - 1];
+    const home = keyOriginFor(phrase(n).song);
+    if (phrase(n).song !== phrase(n - 1).song) return home;
+    let next = prev;
+    if (n > 0 && !phrase(n).drop && phrase(n - 1).drop && rnd(18, n, 0) < KEY_MOVE_CHANCE) {
+      if (rnd(19, n, 0) < KEY_RELATIVE_ODDS) {
+        next = { num: prev.num, mode: prev.mode === 'm' ? 'd' : 'm' };
+      } else {
+        const dir = rnd(20, n, 0) < 0.5 ? -1 : 1;
+        const num = ((prev.num - 1 + dir + 12) % 12) + 1;
+        if (wheelDist(num, home.num) <= MAX_KEY_DRIFT) next = { num, mode: prev.mode };
+      }
+    }
+    return next;
+  });
+}
+function keyAtBar(bar) { return keyAtPhrase(Math.floor(bar / BARS_PER_PHRASE)); }
+function scaleAtBar(bar) {
+  const k = keyAtBar(bar);
+  const minorScale = SCALE_MODE === 'harmonic' ? HARMONIC_MINOR_SCALE
+    : SCALE_MODE === 'phrygian' ? PHRYGIAN_SCALE
+    : MINOR_SCALE;
+  return { root: rootOf(k.num, k.mode), steps: k.mode === 'm' ? minorScale : MAJOR_SCALE, key: k };
+}
+
+function logKeySchedule(phrases) {
+  const secsPerPhrase = BARS_PER_PHRASE * (240 / BPM);
+  const out = ['key ' + keyName(KEY_ORIGIN) + ' - schedule for the next ' +
+               (phrases * secsPerPhrase / 60).toFixed(0) + ' min:'];
+  let prev = null;
+  for (let p = 0; p < phrases; p++) {
+    const k = keyAtPhrase(p);
+    if (!prev || k.num !== prev.num || k.mode !== prev.mode) {
+      const mins = p * secsPerPhrase / 60;
+      out.push('  ' + mins.toFixed(1) + ' min  ' + keyName(k) +
+               (prev ? '  (' + wheelDist(k.num, KEY_ORIGIN.num) + ' fifths from home)' : '  START'));
+      prev = k;
+    }
+  }
+  if (out.length === 1) out.push('  no key changes in this window - as intended');
+  console.log(out.join('\n'));
+}
+logKeySchedule(500);
+
+function logRiskCaps() {
+  const loPhrases = dropPhraseTarget(DROP_BARS, 0), hiPhrases = dropPhraseTarget(DROP_BARS, 1);
+  const loBars = loPhrases * BARS_PER_PHRASE, hiBars = hiPhrases * BARS_PER_PHRASE;
+  const worstRestStreak = Math.max(1, Math.ceil(REST_CAP_MULT / (1 - 0.75)));
+  const secsPerRestStreak = worstRestStreak * SECTION * BARS_PER_PHRASE * SECS_PER_BAR;
+  console.log('@ ' + MODE + ' ' + BPM + 'bpm: breakdown runs ' + loBars + '-' + hiBars +
+    ' bars (' + (loBars * SECS_PER_BAR / 60).toFixed(1) + '-' + (hiBars * SECS_PER_BAR / 60).toFixed(1) +
+    ' min, centered on the researched ' + DROP_BARS + ') - worst-case section-rest streak (a voice at the 0.75 ceiling) ' +
+    worstRestStreak + ' section' + (worstRestStreak === 1 ? '' : 's') +
+    ' (' + (secsPerRestStreak / 60).toFixed(1) + ' min max)');
+}
+logRiskCaps();
+
+const SKEL_VEL_LO = 0.75, SKEL_VEL_HI = 0.95;
+const MAX_GHOST = 0.35;
+const WANDER_LO = 0.15, WANDER_HI = 0.85;
+const GVEL_LO_A = 0.12, GVEL_LO_B = 0.18;
+const GVEL_HI_A = 0.20, GVEL_HI_B = 0.30;
+
+const PHRASE_LIFT  = 1.35;
+const SECTION_LIFT = 1.80;
+const PICKUP_BIAS  = 1.70;
+const PICKUP_ELSE  = 0.72;
+const PICKUP_VEL   = 1.12;
+
+const MOTIF_CHORD = [0, 2, 4];
+const MOTIF_POS = [0, 4, 6, 8, 12, 14, 16, 20, 22, 24, 28];
+const MOTIF_STRONG = [0, 8, 16, 24];
+const MOTIF_N_LO = _preset.motifNoteRange[0], MOTIF_N_HI = _preset.motifNoteRange[1];
+
+function motifSpread(total, moves, id, salt) {
+  const out = new Array(moves).fill(1);
+  let extra = total - moves;
+  for (let k = 0; extra > 0 && k < 50; k++) {
+    const i = Math.floor(rnd(40 + salt, id * 7 + k, 0) * moves);
+    if (out[i] < 3) { out[i]++; extra--; }
+  }
+  return out;
+}
+function motifChordTone(target, lo, hi) {
+  let best = null, bd = 99;
+  for (let o = -2; o <= 3; o++) for (const c of MOTIF_CHORD) {
+    const v = c + o * 7;
+    if (v < lo || v > hi) continue;
+    const d = Math.abs(v - target);
+    if (d < bd) { bd = d; best = v; }
+  }
+  return best === null ? target : best;
+}
+const _motifs = {};
+function motifFor(id) {
+  if (_motifs[id]) return _motifs[id];
+  const n = MOTIF_N_LO + Math.floor(rnd(30, id, 0) * (MOTIF_N_HI - MOTIF_N_LO + 1));
+  const peakLo = Math.floor((n - 1) / 2) + 1;
+  const peakHi = n - 2;
+  const peakIdx = peakHi >= peakLo
+    ? peakLo + Math.floor(rnd(31, id, 0) * (peakHi - peakLo + 1))
+    : Math.max(1, peakHi);
+  const riseMoves = peakIdx, fallMoves = n - 1 - peakIdx;
+  const start = MOTIF_CHORD[Math.floor(rnd(32, id, 0) * MOTIF_CHORD.length)];
+  const rise = riseMoves + Math.floor(rnd(33, id, 0) * 3);
+  const peak = start + rise;
+  const endTarget = peak - (fallMoves + Math.floor(rnd(34, id, 0) * 3));
+  const end = fallMoves > 0 ? motifChordTone(endTarget, start - 4, peak - 1) : peak;
+
+  const degs = [start];
+  motifSpread(rise, riseMoves, id, 0).forEach(m => degs.push(degs[degs.length - 1] + m));
+  if (fallMoves > 0) {
+    motifSpread(Math.max(peak - end, fallMoves), fallMoves, id, 5)
+      .forEach(m => degs.push(degs[degs.length - 1] - m));
+    degs[degs.length - 1] = end;
+  }
+  const pool = MOTIF_POS.slice(1), chosen = [0];
+  for (let i = 0; i < n - 1; i++) {
+    let p = pool[Math.floor(rnd(35, id, i) * pool.length)], guard = 0;
+    while (chosen.indexOf(p) >= 0 && guard++ < 12) p = pool[Math.floor(rnd(36, id, i * 13 + guard) * pool.length)];
+    if (chosen.indexOf(p) < 0) chosen.push(p);
+  }
+  chosen.sort((a, b) => a - b);
+  while (chosen.length < degs.length) degs.pop();
+  if (peakIdx < chosen.length) {
+    let best = chosen[peakIdx], bd = 99;
+    for (const st of MOTIF_STRONG) {
+      if (chosen.indexOf(st) >= 0 && st !== chosen[peakIdx]) continue;
+      const prev = peakIdx > 0 ? chosen[peakIdx - 1] : -1;
+      const nxt = peakIdx + 1 < chosen.length ? chosen[peakIdx + 1] : 99;
+      const d = Math.abs(st - chosen[peakIdx]);
+      if (st > prev && st < nxt && d < bd) { bd = d; best = st; }
+    }
+    chosen[peakIdx] = best;
+  }
+  let d2 = degs.slice(0, chosen.length);
+  const top = Math.max.apply(null, d2);
+  if (top > 6) { const sh = top - 6; d2 = d2.map(x => x - sh); }   // shift down, shape intact
+  const bot = Math.min.apply(null, d2);
+  if (bot < 0) d2 = d2.map(x => x - bot);
+  _motifs[id] = { steps: chosen, degs: d2 };
+  return _motifs[id];
+}
+
+function motifNoteAt(step, bar) {
+  if (!MOTIF_ON) return null;
+  const inCycle = ((bar % MOTIF_CYCLE) + MOTIF_CYCLE) % MOTIF_CYCLE;
+  if (inCycle > 1) return null;               // the rest bar(s) between statements
+  const sec = Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const m = motifFor(songAtBar(bar) * 977 + sec);
+  const pos = inCycle * STEPS + step;
+  const i = m.steps.indexOf(pos);
+  if (i < 0) return null;
+  const statement = Math.floor(bar / MOTIF_CYCLE);
+  let deg = m.degs[i];
+  if (statement % 2 === 1 && i === m.degs.length - 1) deg = motifChordTone(deg - 2, 0, 6);
+  return deg;
+}
+
+const HIT_HI = 0.97, HIT_LO = 0.02;
+function stepProfile(patterns, name, fallback) {
+  const hits = patterns[name] || patterns[fallback];
+  return Array.from({ length: 16 }, (_, i) => (hits.indexOf(i) >= 0 ? HIT_HI : HIT_LO));
+}
+
+const KICK_PATTERNS = {
+  '4x4':     [0, 4, 8, 12],
+  triplet:   [0, 3, 6, 8, 11, 14],
+};
+function kickProfile(name) { return stepProfile(KICK_PATTERNS, name, '4x4'); }
+
+const CLAP_PATTERNS = {
+  backbeat: [4, 12],
+  none:     [],
+};
+function clapProfile(name) { return stepProfile(CLAP_PATTERNS, name, 'backbeat'); }
+
+const PLUCK_PATTERNS = {
+  offsync: [1, 3, 5, 9, 11, 13],
+};
+function pluckProfile(name) { return stepProfile(PLUCK_PATTERNS, name, 'offsync'); }
+
+const PERC_PATTERNS = {
+  threeFour: [0, 3, 6, 9, 12, 15],
+};
+function percProfile(name) { return stepProfile(PERC_PATTERNS, name, 'threeFour'); }
+
+const HAT_ACCENTED = [
+  0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20,
+  0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20 ];
+const HAT_ROLLING = new Array(16).fill(0.90);
+function hatProfile(roll) { return roll ? HAT_ROLLING : HAT_ACCENTED; }
+
+const HAT_ACCENT = [
+  0.85,1.05,0.85,1.05, 0.85,1.05,0.85,1.05,
+  0.85,1.05,0.85,1.05, 0.85,1.05,0.85,1.05 ];
+
+const HAT_OPEN_PATTERNS = {
+  offbeat: [2, 6, 10, 14],               // trance/psy (v52) - steady open "tss" on every off-beat
+  dense:   [1, 2, 5, 6, 9, 10, 13, 14],
+  lift:    [14],
+};
+
+const BASS_PATTERNS = {
+  offbeat:    [2, 6, 10, 14],
+  syncopated: [2, 9, 12],
+};
+function bassProfile(name, kickSteps) {
+  if (name === 'roll16') {
+    return kickSteps.map((isKick, s) => isKick ? 0 : (s % 4 === 2 ? BASS_OFFBEAT : BASS_SIXTEENTH));
+  }
+  const hits = BASS_PATTERNS[name] || BASS_PATTERNS.offbeat;
+  return kickSteps.map((isKick, s) => (isKick || hits.indexOf(s) < 0) ? 0 : BASS_OFFBEAT);
+}
+
+
+const VOICES = [
+  { name: 'kick', note: 36, songStable: true, include: 1.00, ghost: KICK_GHOST_PRESET, drift: 0, dropsOut: KICK_DROPS_OUT,
+    vel: [0.88, 0.96],
+    accent: [1.00,1,1,1, 0.95,1,1,1, 0.975,1,1,1, 0.95,1,1,1],
+    velMap: KICK_HUMAN_PRESET ? null : KICK_VEL_MAP,
+    profile: kickProfile(KICK_PATTERN) },
+  { name: 'hat',  note: 42, rest: 0.10, include: 1.00, ghost: HAT_GHOST_PRESET, drift: HAT_DRIFT_PRESET, dropsOut: KIT_DROPS_OUT_PRESET,
+    openNote: 46, openInclude: 0.75, openPattern: HAT_OPEN_PATTERN,
+    openProfile: [0,0,0.02,0, 0,0,0.10,0, 0,0,0.02,0, 0,0,0.45,0.05],
+    stepVelMap: HAT_HUMAN_PRESET ? null : HAT_VEL_MAP, accent: HAT_ACCENT,
+    nudge: HAT_NUDGE_MS, profile: hatProfile(HAT_ROLL) },
+  { name: 'clap', note: 39, rest: 0.25, include: 0.95, ghost: 0.40 * KIT_GHOST_SCALE, drift: 0.40 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    vel: [KIT_VEL_LO_PRESET, KIT_VEL_HI_PRESET],
+    nudge: SNARE_NUDGE_MS, profile: clapProfile(CLAP_PATTERN) },
+  { name: 'rim',  note: 37, rest: 0.30, include: RIM_INCLUDE, ghost: 0.30 * KIT_GHOST_SCALE, drift: 1.00 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    vel: [KIT_VEL_LO_PRESET, KIT_VEL_HI_PRESET],
+    profile: [0.50, 0.08, 0.18] },
+
+  { name: 'snare', notes: [38, 40], optional: true, rest: 0.30, include: OPTIONAL_INCLUDE.snare, ghost: 0.30 * KIT_GHOST_SCALE, drift: 0.30 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    vel: [KIT_VEL_LO_PRESET, KIT_VEL_HI_PRESET], profile: [
+    0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.02,
+    0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.04 ] },
+
+  { name: 'ride', notes: [51, 50], optional: true, rest: 0.30, include: OPTIONAL_INCLUDE.ride, ghost: 0.60 * KIT_GHOST_SCALE, drift: 0.50 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    minEnergy: 65,
+    accent: [0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1],
+    profile: [
+    0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04,
+    0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04 ] },
+
+  { name: 'lowtom', notes: [41, 45], optional: true, rest: 0.35, include: OPTIONAL_INCLUDE.lowtom, ghost: 0.25 * KIT_GHOST_SCALE, drift: 0.80 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    minEnergy: 35, profile: [0.38, 0.06, 0.06, 0.18, 0.06] },
+
+  { name: 'midtom', notes: [47, 48], optional: true, rest: 0.35, include: OPTIONAL_INCLUDE.midtom, ghost: 0.25 * KIT_GHOST_SCALE, drift: 0.80 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    minEnergy: 45, profile: [0.34, 0.05, 0.12, 0.05, 0.18, 0.05, 0.09] },
+
+  { name: 'crash', notes: [49, 43], optional: true, include: OPTIONAL_INCLUDE.crash, role: 'marker' },
+
+  { name: 'shaker', note: 44, optional: true, rest: 0.20, include: OPTIONAL_INCLUDE.shaker, ghost: 0.50 * KIT_GHOST_SCALE, drift: 0.60 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    profile: [0.70,0.10,0.70,0.10, 0.70,0.10,0.70,0.10, 0.70,0.10,0.70,0.10, 0.70,0.10,0.70,0.10] },
+
+  { name: 'bass', rest: 0.12, include: 1.00, ghost: 0, drift: BASS_DRIFT_PRESET, dropsOut: BASS_DROPS_OUT_PRESET,
+    restGuaranteeOnBoost: true,
+    pitched: true, pitchChoices: BASS_CHOICES_SET, clip: BASS_CLIP, chan: bassChan, profile: null },
+
+  { name: 'motif', include: MOTIF_ON ? MOTIF_INCLUDE_PRESET : 0, kitGuaranteeOnBoost: true, role: 'motif', chan: motifChan,
+    clip: MOTIF_CLIP, vel: [0.66, 0.86] },
+
+  { name: 'stab', rest: STAB_REST, include: STAB_ON ? STAB_INCLUDE_PRESET : 0, kitGuaranteeOnBoost: true, dropsOut: KIT_DROPS_OUT_PRESET, ghost: 0, drift: STAB_DRIFT_PRESET,
+    pitched: true, chordTones: STAB_CHORD_TONES, clip: STAB_CLIP, chan: stabChan,
+    vel: [0.62, 0.82], profile: [
+    0.02,0.02,0.35,0.04, 0.02,0.02,0.30,0.04,
+    0.02,0.02,0.35,0.04, 0.02,0.06,0.40,0.08 ] },
+
+  { name: 'pad', rest: 0.15, include: PAD_ON ? PAD_INCLUDE_PRESET : 0, kitGuaranteeOnBoost: true, ghost: 0, drift: 0.10,
+    dropsOut: false, pitched: true, chordTones: PAD_CHORD_TONES, chordOctave: PAD_OCTAVE,
+    clip: PAD_CLIP, chan: padChan, vel: [0.35, 0.55],
+    profile: [0.97,0.02,0.02,0.02, 0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02] },
+
+  { name: 'pluck', rest: 0.15, include: PLUCK_ON ? 1.00 : 0, ghost: 0, drift: 0.20,
+    dropsOut: false, pitched: true, pitchChoices: BASS_CHOICES_SET, pitchOctave: PLUCK_OCTAVE,
+    clip: PLUCK_CLIP, chan: stabChan, vel: [0.55, 0.80],
+    profile: pluckProfile(PLUCK_PATTERN) },
+
+  { name: 'perc', notes: PERC_NOTES, rest: 0.15, include: PERC_ON ? 1.00 : 0, ghost: 0.15, drift: 0.25,
+    dropsOut: false, profile: percProfile(PERC_PATTERN) },
+];
+
+const voiceNamed = n => VOICES.filter(v => v.name === n)[0];
+const KICK_VOICE = voiceNamed('kick');
+KICK_VOICE.drift = 0;
+const KICK_STEPS = KICK_VOICE.profile.map(p => p >= 0.5);
+const BASS_VOICE = voiceNamed('bass');
+BASS_VOICE.avoid = KICK_STEPS;
+BASS_VOICE.profile = bassProfile(BASS_PATTERN, KICK_STEPS);
+
+function pitchChoiceAt(vi, step, sec, choices) {
+  const r = rnd(21, vi * 997 + step, sec);
+  let acc = 0;
+  for (const c of choices) { acc += c.w; if (r < acc) return c; }
+  return choices[0];
+}
+
+const CRASH_AT_SECTION = 0.45;
+const CRASH_VEL_LO = 0.80, CRASH_VEL_HI = 0.95;
+const OPEN_ACCENT = 1.10;
+
+const _kits = {};
+function kitFor(song) {
+  if (_kits[song]) return _kits[song];
+  const core = VOICES.filter(v => !v.optional && rnd(11, VOICES.indexOf(v), song) < v.include);
+  const opts = VOICES.filter(v => v.optional)
+    .map(v => ({ v, r: rnd(12, VOICES.indexOf(v), song) }))
+    .filter(o => o.r < o.v.include)
+    .sort((a, b) => a.r - b.r)
+    .slice(0, MAX_OPTIONAL)
+    .map(o => o.v);
+  const names = {};
+  core.concat(opts).forEach(v => { names[v.name] = true; });
+  if (HARMONY_MIN_COUNT > 0) {
+    const harmonyVoices = VOICES.filter(v => HARMONY_VOICE_NAMES.includes(v.name) && v.include > 0);
+    const present = harmonyVoices.filter(v => names[v.name]);
+    const missing = harmonyVoices.filter(v => !names[v.name])
+      .map(v => ({ v, r: rnd(13, VOICES.indexOf(v), song) }))
+      .sort((a, b) => a.r - b.r)
+      .map(o => o.v);
+    let have = present.length;
+    while (have < HARMONY_MIN_COUNT && missing.length) {
+      names[missing.shift().name] = true;
+      have++;
+    }
+  }
+  _kits[song] = names;
+  return names;
+}
+const KIT = VOICES;
+
+const DRIFT_CHANCE = 0.5;
+const MAX_DRIFT = 3;
+
+const PROFILE_DRIFT_CHANCE = 0.20; // per SECTION, times v.drift
+const PROFILE_DRIFT_AMOUNT = 0.05; // size of one nudge
+const PROFILE_DRIFT_BAND   = 0.25; // max distance from the printed value, clamped to 0..1
+
+function nudgeSec(ms) { return (ms / 1000) / SECS_PER_BAR; }
+function applyNudge(pat, nudge) {
+  if (nudge === undefined) return pat;
+  if (!Array.isArray(nudge)) return nudge === 0 ? pat : pat.late(nudgeSec(nudge));
+  const [oddMs, evenMs] = nudge;
+  if (oddMs === 0 && evenMs === 0) return pat;
+  const oddMask  = sig(t => stepBar(t)[0] % 2 === 1).segment(STEPS);
+  const evenMask = sig(t => stepBar(t)[0] % 2 === 0).segment(STEPS);
+  return stack(pat.mask(oddMask).late(nudgeSec(oddMs)), pat.mask(evenMask).late(nudgeSec(evenMs)));
+}
+
+function voicePattern(v, vi) {
+  const nn = v.notes ? v.notes[Math.floor(rnd(15, vi, 0) * v.notes.length) % v.notes.length] : v.note;
+
+  if (v.role === 'marker') {
+    const mgate = sig(t => {
+      const [step, bar] = stepBar(t);
+      if (step !== 0) return false;
+      if (!kitFor(songAtBar(bar))[v.name]) return false;
+      if (bar % BARS_PER_PHRASE === 0) {
+        const ph = Math.floor(bar / BARS_PER_PHRASE);
+        if (ph > 0 && !phrase(ph).drop && phrase(ph - 1).drop) return true;
+      }
+      if (bar % (BARS_PER_PHRASE * SECTION) !== 0) return false;
+      return rnd(13, vi, bar) < CRASH_AT_SECTION * efrac(phrase(Math.floor(bar / BARS_PER_PHRASE)));
+    }).segment(STEPS);
+    const mvel = sig(t => CRASH_VEL_LO + rnd(14, vi, Math.floor(t)) * (CRASH_VEL_HI - CRASH_VEL_LO)).segment(STEPS);
+    return note(nn).struct(mgate).velocity(mvel);
+  }
+
+  if (v.role === 'motif') {
+    const g2 = sig(t => {
+      const [step, bar] = stepBar(t);
+      if (!MOTIF_ON) return false;
+      const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+      if (!kitFor(songAtBar(bar))[v.name] && !(v.kitGuaranteeOnBoost && st.boost > 0)) return false;
+      return motifNoteAt(step, bar) !== null;
+    }).segment(STEPS);
+    const n2 = sig(t => {
+      const [step, bar] = stepBar(t);
+      const sc = scaleAtBar(bar);
+      const noteDeg = motifNoteAt(step, bar);
+      const d = noteDeg === null ? 0 : noteDeg;
+      const o = Math.floor(d / 7), ix = ((d % 7) + 7) % 7;
+      return MOTIF_OCTAVE + sc.root + sc.steps[ix] + 12 * o;
+    }).segment(STEPS);
+    const v2 = sig(t => {
+      const [step, bar] = stepBar(t);
+      return v.vel[0] + rnd(2, vi * 997 + step, bar) * (v.vel[1] - v.vel[0]);
+    }).segment(STEPS);
+    const outM = note(n2).struct(g2).velocity(v2);
+    return v.clip !== undefined ? outM.clip(v.clip) : outM;
+  }
+
+  const len = v.profile.length;
+  const maxDrift = Math.max(1, Math.min(MAX_DRIFT, Math.floor(len / 3)));
+  const songOf = song => v.songStable ? 0 : song;
+  const _origs = {};
+  function origFor(song) {
+    const k = songOf(song);
+    if (_origs[k]) return _origs[k];
+    const o = v.drift === 0
+      ? v.profile.map(p => p >= 0.5)
+      : v.profile.map((p, s2) => rnd(0, vi * 997 + s2, k) < p);
+    if (!o.some(Boolean)) {
+      const peak = Math.max.apply(null, v.profile);
+      const strong = [];
+      v.profile.forEach((p, s2) => { if (p >= peak / 2) strong.push(s2); });
+      o[strong[Math.floor(rnd(22, vi, k) * strong.length) % strong.length]] = true;
+    }
+    _origs[k] = o;
+    return o;
+  }
+
+  const _profiles = {};
+  function profileAt(sec, song) {
+    const k = songOf(song);
+    const chain = _profiles[k] || (_profiles[k] = [v.profile.slice()]);
+    return growChain(chain, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(26, vi * 997 + k, n) < PROFILE_DRIFT_CHANCE * v.drift) {
+        const step = Math.floor(rnd(27, vi * 997 + k, n) * len) % len;
+        const dir  = rnd(28, vi * 997 + step + k, n) < 0.5 ? -1 : 1;
+        const base = v.profile[step];
+        const lo   = Math.max(0, base - PROFILE_DRIFT_BAND);
+        const hi   = Math.min(1, base + PROFILE_DRIFT_BAND);
+        const nudged = Math.max(lo, Math.min(hi, prev[step] + dir * PROFILE_DRIFT_AMOUNT));
+        if (nudged !== prev[step]) {
+          next = prev.slice();
+          next[step] = nudged;
+        }
+      }
+      return next;
+    });
+  }
+
+  const _chains = {};
+  function skelAt(sec, song) {
+    const k = songOf(song);
+    const orig = origFor(song);
+    const chain = _chains[k] || (_chains[k] = [orig]);
+    return growChain(chain, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(8, vi * 997 + k, n) < DRIFT_CHANCE * v.drift) {
+        const step = Math.floor(rnd(9, vi * 997 + k, n) * len) % len;
+        const val  = rnd(10, vi * 997 + step + k, n) < profileAt(n, song)[step];
+        if (val !== prev[step]) {
+          const cand = prev.slice();
+          cand[step] = val;
+          let d = 0;
+          for (let i = 0; i < len; i++) if (cand[i] !== orig[i]) d++;
+          if (d <= maxDrift) next = cand;
+        }
+      }
+      return next;
+    });
+  }
+
+  const secOf = bar => Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const idxAt = (step, bar) => (bar * STEPS + step) % len;
+  const restChance = Math.max(0, Math.min(0.75, (v.rest || 0) * SPARSE));
+  const maxRestStreak = Math.max(1, Math.ceil(REST_CAP_MULT / (1 - restChance)));
+  const _restsChain = [];
+  function restsAtSection(sec) {
+    return growChain(_restsChain, sec, arr => {
+      const n = arr.length;
+      let streak = 0;
+      for (let i = n - 1; i >= 0 && arr[i]; i--) streak++;
+      const forced = streak >= maxRestStreak;
+      return !forced && rnd(23, vi, n) < restChance;
+    });
+  }
+  const restsAt = bar => restChance > 0 && restsAtSection(secOf(bar));
+
+  function lift(bar) {
+    if (bar % BARS_PER_PHRASE !== BARS_PER_PHRASE - 1) return 1;
+    const phraseInSection = Math.floor(bar / BARS_PER_PHRASE) % SECTION;
+    return phraseInSection === SECTION - 1 ? SECTION_LIFT : PHRASE_LIFT;
+  }
+  const isPickup = (step, bar) => skelAt(secOf(bar), songAtBar(bar))[(idxAt(step, bar) + 1) % len];
+
+  const voiceFloor = (v.vel ? v.vel[0] : SKEL_VEL_LO) *
+                     (v.accent ? Math.min.apply(null, v.accent) : 1);
+  const ghostCeil = voiceFloor - 0.02;
+
+  const openHits = v.openPattern ? HAT_OPEN_PATTERNS[v.openPattern] : null;
+  const useOpen = openHits ? true : (v.openNote ? rnd(17, vi, 0) < v.openInclude : false);
+  const rawOpen = (step, bar) => rnd(16, vi * 997 + step, bar) < v.openProfile[step];
+  function isOpen(step, bar) {
+    if (openHits) return openHits.indexOf(step) >= 0;
+    if (!useOpen || !rawOpen(step, bar)) return false;
+    for (let k = 1; k <= 3; k++) {
+      let s = step - k, b = bar;
+      if (s < 0) { s += STEPS; b -= 1; }
+      if (b >= 0 && rawOpen(s, b)) return false;
+    }
+    return true;
+  }
+  const openAt = (step, bar) => v.openNote && skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)] && isOpen(step, bar);
+
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (v.dropsOut && st.drop) return false;
+    if (v.minEnergy !== undefined && st.e < v.minEnergy) return false;
+    if (v.avoid && v.avoid[step]) return false;
+    if (!kitFor(songAtBar(bar))[v.name] && !(v.kitGuaranteeOnBoost && st.boost > 0)) return false;
+    if (restsAt(bar) && !(v.restGuaranteeOnBoost && st.boost > 0)) return false;
+    if (skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)]) return true;
+    const w = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
+    const shaped = w * MAX_GHOST * v.ghost * lift(bar) *
+                   (isPickup(step, bar) ? PICKUP_BIAS : PICKUP_ELSE);
+    return rnd(1, vi * 997 + step, bar) < shaped;
+  }).segment(STEPS);
+
+  const velMapHitSteps = v.velMap ? v.profile.reduce((acc, p, i) => { if (p >= 0.5) acc.push(i); return acc; }, []) : null;
+
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    if (skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)]) {
+      if (v.velMap) {
+        const hitIdx = (bar * velMapHitSteps.length + velMapHitSteps.indexOf(step)) % v.velMap.length;
+        return v.velMap[hitIdx];
+      }
+      if (v.stepVelMap) {
+        const idx = (bar * STEPS + step) % v.stepVelMap.length;
+        return v.stepVelMap[idx];
+      }
+      const vlo  = v.vel ? v.vel[0] : SKEL_VEL_LO;
+      const vhi  = v.vel ? v.vel[1] : SKEL_VEL_HI;
+      const acc = (v.accent ? v.accent[step] : 1) * (openAt(step, bar) ? OPEN_ACCENT : 1);
+      const hiA = Math.min(1, vhi * acc);
+      const loA = Math.min(hiA, vlo * acc);
+      return loA + rnd(2, vi * 997 + step, bar) * (hiA - loA);
+    }
+    const f  = efrac(phrase(Math.floor(bar / BARS_PER_PHRASE)));
+    const lo = GVEL_LO_A + f * (GVEL_LO_B - GVEL_LO_A);
+    const hi = GVEL_HI_A + f * (GVEL_HI_B - GVEL_HI_A);
+    const pk = isPickup(step, bar) ? PICKUP_VEL : 1;
+    const hiG = Math.min(ghostCeil, hi * pk);
+    const loG = Math.min(hiG, lo * pk);
+    return loG + rnd(3, vi * 997 + step, bar) * (hiG - loG);
+  }).segment(STEPS);
+
+  const noteSig = v.pitched
+    ? sig(t => {
+        const [step, bar] = stepBar(t);
+        const sc  = scaleAtBar(bar);
+        const oct = v.pitchOctave !== undefined ? v.pitchOctave : BASS_OCTAVE;
+        const c   = pitchChoiceAt(vi, step, secOf(bar), v.pitchChoices || BASS_CHOICES);
+        return oct + sc.root + sc.steps[c.idx] + 12 * c.oct;
+      }).segment(STEPS)
+    : v.openNote
+      ? sig(t => { const [step, bar] = stepBar(t); return openAt(step, bar) ? v.openNote : nn; }).segment(STEPS)
+      : nn;
+
+  if (v.chordTones) {
+    const chordOct = v.chordOctave !== undefined ? v.chordOctave : STAB_OCTAVE;
+    const layers = v.chordTones.map(idx => {
+      const s = sig(t => {
+        const sc = scaleAtBar(Math.floor(t));
+        return chordOct + sc.root + sc.steps[idx];
+      }).segment(STEPS);
+      const layer = note(s).struct(gate).velocity(vel);
+      return v.clip !== undefined ? layer.clip(v.clip) : layer;
+    });
+    return stack.apply(null, layers);
+  }
+
+  const out = note(noteSig).struct(gate).velocity(vel);
+  const clipped = v.clip !== undefined ? out.clip(v.clip) : out;
+  return applyNudge(clipped, v.nudge);
+}
+
+const withSwing = p => SWING > 0 ? p.swingBy(SWING, SWING_GRID) : p;
+const patternsFor = pred =>
+  stack(...KIT.filter(pred).map(v => voicePattern(v, VOICES.indexOf(v))));
+
+const chanOf = v => v.chan !== undefined ? v.chan : drumChan;
+const usedChans = KIT.map(chanOf).filter((c, i, a) => a.indexOf(c) === i).sort((a, b) => a - b);
+
+stack(
+  ...usedChans.map(ch => {
+    const p = patternsFor(v => chanOf(v) === ch);
+    return withSwing(p).midichan(ch);
+  })
+).midi(midi)
