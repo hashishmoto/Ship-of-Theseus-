@@ -1,4 +1,4 @@
-// THE DNB ENGINE - dev (fully commented) - v8
+// THE DNB ENGINE - dev (fully commented) - v10
 // FULL REBUILD (v5) on Ship of Theseus's own architecture, not another
 // patch on top of Bass Engine's. Prompted directly: v1-v4 patched real
 // bugs one at a time (bassLeads inversion, ride's missing seed identity,
@@ -117,7 +117,18 @@ const OPEN_KEY = '6m';   // key, Camelot notation. 6m = D minor.
 //                halftime against it (snare on beat 3, trap/dubstep's own
 //                borrowed pocket) - Halftime's own real convention, not
 //                mainstream DnB's.
-const BPM = 140;
+// v9 fix: this was 140 through v8 - outside BOTH presets' own documented
+// 160-180 range above, and never actually noticed because nothing in this
+// file checks BPM against that range at runtime. Inherited unchanged from
+// Bass Engine's own trap-tempo default (140) across every fork since -
+// harmless for trap, wrong for DnB. Every real-time-duration target in
+// this file (songMinutes, sectionSeconds, and this pass's own
+// avgBarsPerDrop() verification) is computed FROM this value via
+// SECS_PER_BAR - running it at 140 would make all of those targets land
+// at the wrong actual song length even if their own bar-count math were
+// right. Set to 170, the canonical value both presets' own tempo comments
+// already named.
+const BPM = 170;
 const BPM_RAMP_SECONDS = 8;
 
 if (typeof setcpm !== 'undefined') {
@@ -294,6 +305,15 @@ const MODE_PRESETS = {
     rideDrift: 0.15, // low - "one solid foundational loop pattern," per general hi-hat/ride production convention, plus the "steady throughout" Amen-ride citation specifically
     rideRest: 0, // never - ride stays standing through a breakdown
     rideDeterministic: true, // "full-strength throughout" - tested, a plain probabilistic roll had a real ~22% chance of dropping a position from bar one
+    // v10 - was a hard 0 through v9 ("the roll is the only variation
+    // mechanism"), corrected after real listening feedback confirmed it
+    // read as too fixed. Modest, not high - the "full-strength throughout"
+    // citation still argues against dense hi-hat chatter, this is closer
+    // to dubtechno's own conservative 0.20 hat-ghost register in Ship of
+    // Theseus than to a typical hat's uncapped 1.00. Real citation for the
+    // general idea (hi-hat ghost notes "fill in the gaps... provide a
+    // sense of forward momentum"), not for this exact number.
+    rideGhost: 0.15,
     // v6 - real, specific Amen citation: the open hi-hat replaces the ride
     // on the "and" of beat 3, specifically in the last bar of a phrase.
     // Not a claim mainstream DnB always does this (no citation found
@@ -343,10 +363,33 @@ const MODE_PRESETS = {
     kitDriftScale: 1.00,
     kitGhostScale: 1.00,
 
+    // v9 - actually researched, not carried-over generic defaults. Real
+    // DnB arrangement citation: 32-bar intro, 16-bar build, 64-bar first
+    // drop, 16-32 bar mid-section, 32-bar breakdown (often drumless),
+    // 16-bar second build, 64-bar second drop, 32-bar outro - summing to
+    // ~280 bars, two breakdown/drop cycles, total track 5-6 minutes.
+    // `dropBars: 32` is a direct read of the cited breakdown length -
+    // `dropBars: 6` (every version through v8) wasn't a reasoned estimate
+    // for DnB at all, it was trap's own unrelated default, never replaced.
+    // `dropPatience: 15` was TUNED, not guessed: ran this file's own
+    // avgBarsPerDrop() simulation (same tool Ship of Theseus used for its
+    // techno/trance breakdown-cadence verification) across candidate
+    // values until the simulated average bars-between-breakdowns (~114)
+    // landed in the citation-derived target range (~110-140 bars, from
+    // summing the intro+build+first-drop distance and the mid+build+
+    // second-drop distance separately). `songMinutes: 5.5` (middle of the
+    // cited 5-6 minute range) and `sectionSeconds: 45` (targets the 32-bar
+    // unit the citation uses most often - intro/breakdown/half-drop/outro
+    // all cite 32) were then checked TOGETHER, not independently: at
+    // BPM=170 this combination gives SECTION=32 bars (matches) and
+    // SONG_DROPS=2 breakdown cycles per song (matches the cited two-drop
+    // structure exactly) - the two most structurally important facts, not
+    // just the raw bar-count sum (which lands at 234 vs. the citation's
+    // own ~280, close given how loose its own ranges are, not exact).
     dropPatience: 15,
-    dropBars: 6,
-    songMinutes: 4.5,
-    sectionSeconds: 36,
+    dropBars: 32,
+    songMinutes: 5.5,
+    sectionSeconds: 45,
     sparse: 0.8, // denser than dnbHalftime - Halftime deliberately borrows hip-hop's spacious feel, mainstream DnB doesn't
   },
 
@@ -422,6 +465,12 @@ const MODE_PRESETS = {
     rideDrift: 0.20,
     rideRest: 0,
     rideDeterministic: true, // same "full-strength throughout" reasoning as dnb
+    // v10 - slightly higher than dnb's 0.15: Halftime's own hats are
+    // separately cited as "syncopated" with "slight swing or off-grid
+    // placements," a bit more license for movement than dnb's stricter
+    // Amen "full-strength throughout" framing. Same "modest, not dense"
+    // register though, not a big difference.
+    rideGhost: 0.20,
     rideOpenOn: false, // not claiming Amen-break identity - this specific documented detail is dnb's, not Halftime's
     rollBaseChance: 0.08,
     rollPhraseEndMult: 3.0,
@@ -464,10 +513,18 @@ const MODE_PRESETS = {
     kitDriftScale: 1.00,
     kitGhostScale: 1.00,
 
+    // v9 - same values as dnb, same reasoning (see that preset's own
+    // header comment for the full sourcing/tuning). No Halftime-specific
+    // arrangement citation was found distinct from mainstream DnB's own
+    // structure - searched for one directly, came back empty, so this
+    // reuses the mainstream structure rather than inventing an
+    // unevidenced difference. Real difference between the two presets
+    // stays in `sparse` below (Halftime's own hip-hop-borrowed spaciousness
+    // citation), not in these four fields.
     dropPatience: 15,
-    dropBars: 6,
-    songMinutes: 4.5,
-    sectionSeconds: 36,
+    dropBars: 32,
+    songMinutes: 5.5,
+    sectionSeconds: 45,
     sparse: 0.9,
   },
 };
@@ -841,7 +898,21 @@ const VOICES = [
 
   { name: 'ride', note: 51, chan: drumChan, steps: RIDE_STEPS,
     drift: _preset.rideDrift, deterministic: _preset.rideDeterministic, rest: _preset.rideRest,
-    ghost: 0, // no generic ghost mechanism - the roll IS ride's variation mechanism
+    // v10 correction: was a hard 0 ("the roll IS ride's variation
+    // mechanism") - real listening feedback plus a cross-check both said
+    // this was wrong. The base pattern is genuinely 100% fixed
+    // (deterministic origin, low drift) and rolls are the only OTHER thing
+    // that ever happens - nothing between "frozen" and "full burst."
+    // Checked against the rest of this file's own family: every other
+    // hat/ride voice in Bass Engine and Ship of Theseus has a real nonzero
+    // ghost value (SoT's own hat defaults to 1.00, only dropping to 0.20
+    // for dubtechno's specific "static/hypnotic" citation) - this was the
+    // only one anywhere set to a literal zero. Roll and ghost aren't
+    // redundant: roll is a big, organized, structural burst; ghost is
+    // occasional single-hit texture, same "fill in the gaps... forward
+    // momentum" hi-hat citation already found earlier in this project's
+    // own research. `rideGhost` below.
+    ghost: _preset.rideGhost,
     dropsOut: false, // ride stays standing through a breakdown
     swing: true, // the one deliberate per-voice swing departure from SoT - see this file's top comment
     rollOn: _preset.rideOn, rollBaseChance: _preset.rollBaseChance,
