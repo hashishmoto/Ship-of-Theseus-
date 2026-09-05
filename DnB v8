@@ -1,0 +1,1234 @@
+// THE DNB ENGINE - dev (fully commented) - v8
+// FULL REBUILD (v5) on Ship of Theseus's own architecture, not another
+// patch on top of Bass Engine's. Prompted directly: v1-v4 patched real
+// bugs one at a time (bassLeads inversion, ride's missing seed identity,
+// a bass gate/clip mismatch, cross-voice rnd() correlation) on top of Bass
+// Engine's hand-coded-per-voice-function shape - and a direct "this feels
+// glitchy, we're far from a real dnb core" report was the right call: that
+// shape had reached its limit. Rebuilt from Ship of Theseus's actual
+// engine instead (not just borrowing its CLAUDE.md ideas - read start to
+// finish this time: the `VOICES` array, the generic `voicePattern()`
+// function, `kitFor()`), because SoT's whole premise turns out to fit DnB
+// far better than Bass Engine's ever could: SoT decides ONE voice first
+// ("the grid" - songStable, drift 0) and derives everything else from it.
+// That's DnB's own real architecture (breakbeat leads, bass follows/
+// reinforces), not Bass Engine's bass-always-leads one this project was
+// built on through v4.
+//
+// What's reused near-verbatim from SoT (genuinely proven, genre-agnostic
+// engine machinery, real work already done there): the seeded hash PRNG,
+// the energy/breakdown arrangement walk, the key/scale system, the
+// generic per-voice skeleton+drift+rest+ghost mechanism inside
+// `voicePattern()`, and the whole `VOICES`-array-plus-`kitFor()` kit-
+// membership architecture. What's kept from this project's own prior
+// versions (real, DnB-specific work that SoT has no equivalent for, not
+// discarded just because the foundation changed): the chord-loop
+// mechanism (root motion under the bass/motif), the hi-hat/ride roll-
+// burst generator, and `breakGhostTemplates` (v2's fix for real Amen
+// ghost-pickup positions - see its own comment below).
+//
+// One real bug found while reading SoT closely enough to port it
+// correctly (not touched here - out of scope, SoT is a sibling project,
+// not this rebuild's target - but avoided in this file): SoT computes
+// `KICK_STEPS` (bass's avoid-list) via a FRESH probabilistic re-roll of
+// kick's profile, separate from `origFor()`'s own deterministic roll for
+// kick itself (drift:0 voices use `profile.map(p => p>=0.5)` there) - two
+// independent computations of the same fact, exactly the bug shape this
+// project's own v4 fix (`bassHitAt`) just corrected. Rare in practice
+// (only disagrees on the ~2-3% HIT_LO/HIT_HI margin), but the same class
+// of latent inconsistency. This file's own lead/follow derivation (see
+// "kick+bass coupling" below) computes the lead voice's hit positions
+// exactly once and reads that single source everywhere, on purpose.
+//
+// Real, deliberate departures from SoT's own conventions (kept from this
+// project's prior versions, re-justified here since the foundation
+// changed):
+// - `v.deterministic` (set via each voice's own `kickDeterministic`/
+//   `snareDeterministic`/`rideDeterministic`/`bassDeterministic` preset
+//   field) is its own explicit flag, decoupled from `drift`. SoT ties
+//   "exact initial roll" strictly to `drift===0`
+//   (only kick ever gets it) - this file needs BOTH a guaranteed-correct
+//   backbone AND real ongoing per-song drift on that same voice (dnb's
+//   kick/snare, dnbHalftime's bass/kick - see MODE_PRESETS), which SoT's
+//   single combined flag can't express.
+// - Real snare GM notes (`[38,40]`), not a hand clap (GM 39). Bass
+//   Engine's clap-for-snare choice was defensible for trap (a real trap
+//   convention) but was never re-checked for DnB, where the Amen break's
+//   actual source instrument is a snare drum - fixed here, flagged then
+//   fixed now rather than carried forward again.
+// - `kitDriftScale`/`kitGhostScale` (ported from SoT) apply only to
+//   snare - kick and bass each have their own explicit, individually-
+//   researched drift/ghost dials already (matches SoT's own convention:
+//   kick/bass never used the scale either, only the shared-formula voices
+//   did).
+// - Swing applies per-VOICE (a `v.swing` flag), not per-channel like SoT.
+//   Every citation behind this file's swing values is specifically about
+//   the ride, never kick/snare/bass - SoT's per-channel `withSwing()` was
+//   right FOR SoT (several of its own modes have genuinely channel-wide
+//   swing citations) but was never right here, a fix this project made
+//   back in v1 and keeps.
+// - The ride's roll-burst generator and its finer `RIDE_STEPS=32` grid
+//   have no SoT equivalent at all - trap's signature move, kept because
+//   it's real, proven, DnB-lineage-relevant machinery from this project's
+//   own history, not because SoT does it this way.
+//
+// v6 built the open-hat/ride-switch voice flagged as deferred in v5 -
+// asked directly whether either deferred gap was actually blocked by
+// Strudel itself, not just by this project's own scope choices. It
+// wasn't: Strudel's own mini-notation has native per-cycle alternation
+// (`<a b>`) and cycle-based combinators (`.every()`, `.chunk()`), but this
+// engine never uses that layer anywhere - every voice is a `signal()`
+// callback with direct, already-available access to the absolute bar
+// number, which is sufficient to build bar-position-conditioned behavior
+// in plain JS without needing Strudel's higher-level pattern algebra at
+// all. `rideOpenOn` (dnb only) adds SoT's `openNote` idea plus a small
+// extension SoT doesn't have: gating on `isPhraseEndBar()` so the swap
+// only fires in the LAST bar of a phrase, matching the Amen break's own
+// "open hat replaces the ride on the & of 3 in the last bar" detail
+// exactly, not a generic every-bar accent.
+//
+// Still NOT built, for reasons of judgment rather than Strudel capability
+// (same finding applies - both are buildable in plain JS on this file's
+// existing bar-number access): a genuine 2-bar alternating breakbeat, and
+// a crash-on-drop marker voice (SoT's `role:'marker'` is directly
+// portable). The 2-bar case specifically was reconsidered, not just
+// deferred again - see this file's own CLAUDE.md for why forcing a strict
+// bar-pair repeat wasn't obviously more musical than what
+// `breakGhostTemplates` already does (a per-bar categorical draw that
+// already clusters into repeated runs by chance, without an artificial
+// rule forcing it).
+//
+// Companion file: "DnB Engine live.js" - not yet created. Per the
+// standing exception below (project in active development), the live
+// file isn't touched or created until asked for.
+// ============================================================
+//  Everything you touch mid-set is in this block. Nothing below it.
+// ============================================================
+
+const midi = 'IAC Driver Bus 1';   // your MIDI port
+
+const SEED     = 7;      // track change. New bassline, new roll placement, new kit.
+const OPEN_KEY = '6m';   // key, Camelot notation. 6m = D minor.
+
+// -- tempo --------------------------------------------------------
+//   dnb          160-180 (170 canonical) - DnB's own engine tempo, felt
+//                STRAIGHT: a standard 2-and-4 backbeat, no halftime pocket.
+//   dnbHalftime  160-180 (170 canonical) - same engine tempo, felt as true
+//                halftime against it (snare on beat 3, trap/dubstep's own
+//                borrowed pocket) - Halftime's own real convention, not
+//                mainstream DnB's.
+const BPM = 140;
+const BPM_RAMP_SECONDS = 8;
+
+if (typeof setcpm !== 'undefined') {
+  const _tempo = (globalThis.__dnbEngineTempo = globalThis.__dnbEngineTempo || { bpm: undefined, timer: null });
+  if (_tempo.timer) { clearInterval(_tempo.timer); _tempo.timer = null; }
+  if (_tempo.bpm === undefined || BPM_RAMP_SECONDS <= 0 || _tempo.bpm === BPM) {
+    _tempo.bpm = BPM;
+    setcpm(BPM / 4);
+  } else {
+    const fromBpm = _tempo.bpm, toBpm = BPM, stepMs = 100;
+    const steps = Math.max(1, Math.round(BPM_RAMP_SECONDS * 1000 / stepMs));
+    let step = 0;
+    _tempo.timer = setInterval(() => {
+      step += 1;
+      const t = Math.min(1, step / steps);
+      _tempo.bpm = fromBpm + (toBpm - fromBpm) * t;
+      setcpm(_tempo.bpm / 4);
+      if (t >= 1) { clearInterval(_tempo.timer); _tempo.timer = null; }
+    }, stepMs);
+  }
+}
+
+// -- mode ---------------------------------------------------------
+//   dnb/dnbHalftime - both built, see MODE_PRESETS below.
+const MODE = 'dnb';
+
+const MODE_OVERRIDES = {};
+
+// ============================================================
+//  Below here is the engine. You should not need to touch it.
+// ============================================================
+
+const drumChan = 1, bassChan = 2, leadChan = 3;
+
+const STEPS = 16;       // bar grid for kick/snare/bass/melody
+const RIDE_STEPS = 32;  // ride's own finer grid - a roll needs room to pack
+                         // more than 16 hits/bar into a single beat. No SoT
+                         // equivalent - see this file's top comment.
+const BARS_PER_PHRASE = 4;
+
+const sig = (typeof signal !== 'undefined') ? signal : (f) => time.fmap(f);
+
+// ---- reused verbatim from Ship of Theseus: seeded hash PRNG, its
+// growing-memoized-chain helper, and the (step,bar) decomposition every
+// per-16th signal callback needs. None of this is genre-specific. ----
+function rnd(kind, a, b) {
+  let h = (kind * 374761393 + a * 668265263 + b * 2246822519 + SEED * 3266489917) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = Math.imul(h ^ (h >>> 16), 2246822507);
+  h = h ^ (h >>> 15);
+  return (h >>> 0) / 4294967296;
+}
+function growChain(arr, i, step) {
+  if (!(i >= 0)) i = 0;
+  i = Math.min(i, arr.length + 4096);
+  while (arr.length <= i) arr.push(step(arr));
+  return arr[i];
+}
+const stepBar = (t, steps = STEPS) => [Math.floor(t * steps) % steps, Math.floor(t)];
+
+function weightedChoice(kind, vi, step, sec, choices) {
+  const r = rnd(kind, vi * 997 + step, sec);
+  let acc = 0;
+  for (const c of choices) { acc += c.w; if (r < acc) return c; }
+  return choices[0];
+}
+
+// ============================================================
+//  MODE_PRESETS
+// ============================================================
+const MODE_PRESETS = {
+  // dnb - mainstream/dancefloor drum & bass. bassLeads:false - kick+snare
+  // (the breakbeat) are the grid, bass reinforces/follows them - the Amen
+  // break's and 2-step's own real relationship.
+  dnb: {
+    bassLeads: false,
+
+    // Kick is the LEAD voice here (see "kick+bass coupling" below). Two
+    // positions, two independently-converging citations: beat 1, and step
+    // 10 (Amen's "and of beat 3" / 2-step's "kick pushed to the 8th before
+    // the second snare" - same step, two sources).
+    kickPattern: [0, 10],
+    // Real per-song wander, but low - the two sync points are canonical,
+    // but mainstream DnB spans liquid-to-jump-up and isn't as ritually
+    // static as one-drop. Estimate.
+    kickDrift: 0.20,
+    kickRest: 0.05, // low - this coupling is reliable, not sparse texture
+    // kickDeterministic:true - 2-step's defining coincidence should
+    // never silently miss its initial roll, even though real ongoing
+    // drift (above) is intended. See this file's own top comment.
+    kickDeterministic: true,
+    // Modest lead-voice ghost - real extra syncopated kicks exist in
+    // busier mainstream DnB (jump-up especially) beyond the core 2-step
+    // skeleton. Estimate, not a hard citation.
+    kickGhost: 0.08,
+    kickFillBoost: 2.0,
+    kickDropsOut: true,
+    // Kick's own follower-shape fields (used when bassLeads:true, i.e.
+    // dnbHalftime) are unused placeholders here - object-shape consistency,
+    // same idiom as dnbHalftime's own placeholder kickPattern/kickDrift/
+    // kickRest/kickDeterministic above. Missing from this preset in v5,
+    // caught and fixed at v6 - not by inspection, by re-running the same
+    // field-parity check this file's own CLAUDE.md already treats as
+    // standard verification, after the v6 changes prompted a re-check.
+    kickReinforce: 0.85,
+    kickReinforceDrift: 0.10,
+    kickBeat1Chance: 0.90,
+
+    // Bass's own lead-voice fields (used when bassLeads:true) are unused
+    // placeholders here - same fix as the kick placeholders above.
+    bassPattern: [0, 6, 8, 12],
+    bassDrift: 0.25,
+    bassRest: 0.08,
+    bassDeterministic: false,
+
+    // Bass is the FOLLOWER - reinforces a fraction of kick's hits (the
+    // "kick and bass coincide, that's where the punch comes from"
+    // citation). High - this coupling IS 2-step's defining structural fact.
+    bassReinforce: 0.85,
+    bassReinforceDrift: 0.10,
+    // Real extra syncopated BASS hits in kick's own gaps, independent of
+    // the 2 locked sync points - lets the reese line have real movement
+    // beyond a flat 2-hit copy of the kick. Moderate-high estimate.
+    bassGhost: 0.25,
+    bassFillBoost: 2.0,
+    bassOctave: 36,
+    bassChoices: [
+      { idx: 0, oct: 0,  w: 0.65 },
+      { idx: 0, oct: -1, w: 0.20 },
+      { idx: 4, oct: 0,  w: 0.10 },
+      { idx: 6, oct: -1, w: 0.05 },
+    ],
+    bassChoicesEnd: [
+      { idx: 0, oct: 0,  w: 0.35 },
+      { idx: 0, oct: -1, w: 0.35 },
+      { idx: 4, oct: 0,  w: 0.15 },
+      { idx: 6, oct: -1, w: 0.15 },
+    ],
+
+    // THE core fix this whole lineage exists for: a standard 2-and-4
+    // backbeat.
+    snarePattern: [4, 12],
+    snareDrift: 0.10, // very low - as canonical/universal a drum convention as exists
+    snareRest: 0.03,
+    snareDeterministic: true, // same reasoning as kick above
+    // Superseded by breakGhostTemplates below - unused placeholder for
+    // object-shape consistency with dnbHalftime.
+    snareGhost: 0.35,
+    snareFillBoost: 2.0,
+    snareNudgeMs: 0,
+
+    // v2's real fix, carried forward unchanged: real jungle break-chopping
+    // resequences a small set of actual hits - the REORDERING is MIDI-
+    // representable even though the acoustic chop isn't. Each bar draws
+    // ONE named template (bounded categorical choice, never a per-hit
+    // coin-flip) fixing which of the Amen break's documented ghost
+    // positions - step 7 ("a" of beat 2), step 9 ("e" of beat 3), step 15
+    // ("a" of beat 4) - are active. Weights lean busy (real structural
+    // feature, not an occasional embellishment) but leave room for clean
+    // bars too. Estimate on weights, not on the positions themselves.
+    useBreakTemplates: true,
+    breakGhostTemplates: [
+      { ghosts: [7, 9, 15], w: 0.30 },
+      { ghosts: [15],       w: 0.25 },
+      { ghosts: [7, 9],     w: 0.20 },
+      { ghosts: [9],        w: 0.15 },
+      { ghosts: [],         w: 0.10 },
+    ],
+
+    rideOn: true,
+    // Steady 8th-note pulse - the Amen break's own ride plays full-
+    // strength 8th notes throughout, not a busy 16th pattern.
+    rideBaseSubsteps: [0, 4],
+    rideDrift: 0.15, // low - "one solid foundational loop pattern," per general hi-hat/ride production convention, plus the "steady throughout" Amen-ride citation specifically
+    rideRest: 0, // never - ride stays standing through a breakdown
+    rideDeterministic: true, // "full-strength throughout" - tested, a plain probabilistic roll had a real ~22% chance of dropping a position from bar one
+    // v6 - real, specific Amen citation: the open hi-hat replaces the ride
+    // on the "and" of beat 3, specifically in the last bar of a phrase.
+    // Not a claim mainstream DnB always does this (no citation found
+    // beyond the classic break itself), but it's the one place this file
+    // can point directly at a documented Amen-break detail rather than a
+    // general genre-level inference.
+    rideOpenOn: true,
+    rollBaseChance: 0.08,
+    rollPhraseEndMult: 3.0,
+    rollLengths: [{ n: 8, w: 0.35 }, { n: 12, w: 0.35 }, { n: 16, w: 0.30 }],
+    // Real, modest evidence: lightly swung hats/ride, without overwhelming
+    // the kick/snare's propulsion. Applies to the ride voice ONLY (see
+    // this file's own top comment on the per-voice swing departure).
+    swingPct: 54,
+    swingGrid: 8,
+
+    // scaleMode was here through v7 and was never actually read anywhere -
+    // the natural-minor-vs-Phrygian choice is entirely driven by
+    // phrygianChance below, not this field. Removed (v8) rather than
+    // wired up: exactly the "dead VOICES field" bug class this project's
+    // own history already warns about, caught by auditing every preset
+    // field for a real reader before trusting it, not by inspection.
+    phrygianChance: 0,
+    keyMoveChance: 0.08,
+    // Mainstream DnB's harmonic range spans from liquid's richer, jazz-
+    // adjacent chords to jump-up's minimal drones; middle ground, not
+    // either extreme.
+    chordLoopTemplates: [
+      { degs: [0],    w: 0.30 },
+      { degs: [0, 5], w: 0.25 },
+      { degs: [0, 6], w: 0.20 },
+      { degs: [0, 3], w: 0.15 },
+      { degs: [0, 5, 6, 5], w: 0.10 },
+    ],
+    chordLoopBarLen: 2,
+
+    motifOn: true,
+    motifCycle: 4,
+    motifNoteRange: [2, 4],
+    motifOctave: 74,
+    motifClip: 0.5,
+
+    // Ported from Ship of Theseus - applies to snare only (kick/bass each
+    // have their own explicit dials already, matching SoT's own
+    // convention). 1.00 - no citation for reducing it below the generic
+    // default, unlike dubtechno's own researched 0.20 in SoT.
+    kitDriftScale: 1.00,
+    kitGhostScale: 1.00,
+
+    dropPatience: 15,
+    dropBars: 6,
+    songMinutes: 4.5,
+    sectionSeconds: 36,
+    sparse: 0.8, // denser than dnbHalftime - Halftime deliberately borrows hip-hop's spacious feel, mainstream DnB doesn't
+  },
+
+  // dnbHalftime - Halftime, a real, distinct subgenre that deliberately
+  // borrows trap/dubstep's halftime pocket (snare on beat 3) over drum &
+  // bass's own 170bpm engine. bassLeads:true - unlike dnb, this genre's
+  // real architecture genuinely IS bass-leads-kick (same as trap/dubstep,
+  // where it borrows its pocket from).
+  dnbHalftime: {
+    bassLeads: true,
+
+    // Kick's own lead-voice fields are unused placeholders here (kick is
+    // the follower when bassLeads:true) - object-shape consistency with dnb.
+    kickPattern: [0, 10],
+    kickDrift: 0.20,
+    kickRest: 0.05,
+    kickDeterministic: false,
+    // Real follower-shape fields (bassLeads:true path).
+    kickReinforce: 0.70,
+    kickReinforceDrift: 0.15,
+    // Higher than dnb's own kickGhost - DnB-lineage low ends (Halftime
+    // included) read as one of the busier, more syncopated kick genres
+    // this file covers. Estimate.
+    kickGhost: 0.15,
+    // Beat 1 is applied directly into the reinforce profile's own step 0,
+    // not a separate mechanism (see "kick+bass coupling" below) - high,
+    // matches the same near-universal drum-programming convention trap/
+    // dubstep already established in the sibling projects.
+    kickBeat1Chance: 0.85,
+    kickFillBoost: 2.5,
+    kickDropsOut: true,
+
+    // Bass is the LEAD voice here - its own fields are real.
+    bassPattern: [0, 6, 8, 12],
+    bassDrift: 0.25,
+    bassRest: 0.08,
+    bassDeterministic: false, // real intended per-song variety, not a claim so canonical it needs the deterministic treatment
+    // Follower-shape fields unused here (bassLeads:true) - placeholders.
+    bassReinforce: 0.85,
+    bassReinforceDrift: 0.10,
+    bassGhost: 0.25,
+    bassFillBoost: 2.0,
+    bassOctave: 36,
+    bassChoices: [
+      { idx: 0, oct: 0,  w: 0.65 },
+      { idx: 0, oct: -1, w: 0.20 },
+      { idx: 4, oct: 0,  w: 0.10 },
+      { idx: 6, oct: -1, w: 0.05 },
+    ],
+    bassChoicesEnd: [
+      { idx: 0, oct: 0,  w: 0.35 },
+      { idx: 0, oct: -1, w: 0.35 },
+      { idx: 4, oct: 0,  w: 0.15 },
+      { idx: 6, oct: -1, w: 0.15 },
+    ],
+
+    // Halftime snare on beat 3 - Halftime's own defining structural move,
+    // NOT mainstream DnB's (that's dnb's 2-and-4 above).
+    snarePattern: [8],
+    snareDrift: 0.15,
+    snareRest: 0.05,
+    snareDeterministic: false, // real intended per-song variety
+    snareGhost: 0.20, // real, documented technique (amen-style extra snare hits/rolls), moderate not extreme
+    snareFillBoost: 2.5,
+    snareNudgeMs: 0,
+    useBreakTemplates: false, // not claiming Amen-break identity - keeps the generic ghost mechanism
+    breakGhostTemplates: [{ ghosts: [], w: 1 }], // unused placeholder
+
+    rideOn: true,
+    // Straight 16ths, same busy baseline as trap - Halftime keeps DnB's
+    // driving "engine room" pulse running under its halftime snare/kick.
+    rideBaseSubsteps: [0, 2, 4, 6],
+    rideDrift: 0.20,
+    rideRest: 0,
+    rideDeterministic: true, // same "full-strength throughout" reasoning as dnb
+    rideOpenOn: false, // not claiming Amen-break identity - this specific documented detail is dnb's, not Halftime's
+    rollBaseChance: 0.08,
+    rollPhraseEndMult: 3.0,
+    rollLengths: [{ n: 8, w: 0.35 }, { n: 12, w: 0.35 }, { n: 16, w: 0.30 }],
+    // v7 correction: was 50 (true no-op), reasoned by analogy to trap/
+    // dubstep's own hard evidence for zero swing ("Halftime is driving/
+    // quantized like them") - never independently checked for Halftime
+    // itself. Real Halftime-specific evidence says otherwise: "aim for a
+    // head-nod pocket: strong downbeats, syncopated hats... slight swing
+    // or off-grid placements add human feel." Light, matching the cited
+    // "slight" language - not dnb's own 54 (a "subtle touch" citation for
+    // a different, mainstream-DnB source), and nowhere near dub's heavy
+    // 58. Applies to the ride voice only, same per-voice scoping as dnb.
+    swingPct: 52,
+    swingGrid: 8,
+
+    // scaleMode was here through v7 and was never actually read anywhere -
+    // the natural-minor-vs-Phrygian choice is entirely driven by
+    // phrygianChance below, not this field. Removed (v8) rather than
+    // wired up: exactly the "dead VOICES field" bug class this project's
+    // own history already warns about, caught by auditing every preset
+    // field for a real reader before trusting it, not by inspection.
+    phrygianChance: 0,
+    keyMoveChance: 0.08,
+    chordLoopTemplates: [
+      { degs: [0],    w: 0.30 },
+      { degs: [0, 5], w: 0.25 },
+      { degs: [0, 6], w: 0.20 },
+      { degs: [0, 3], w: 0.15 },
+      { degs: [0, 5, 6, 5], w: 0.10 },
+    ],
+    chordLoopBarLen: 2,
+
+    motifOn: true,
+    motifCycle: 4,
+    motifNoteRange: [2, 4],
+    motifOctave: 74,
+    motifClip: 0.5,
+
+    kitDriftScale: 1.00,
+    kitGhostScale: 1.00,
+
+    dropPatience: 15,
+    dropBars: 6,
+    songMinutes: 4.5,
+    sectionSeconds: 36,
+    sparse: 0.9,
+  },
+};
+
+const _preset = { ...(MODE_PRESETS[MODE] || MODE_PRESETS.dnb), ...MODE_OVERRIDES };
+const BASS_LEADS = _preset.bassLeads;
+
+// ---- energy/breakdown arrangement walk - reused verbatim from Ship of
+// Theseus. Genuinely genre-agnostic. ----
+const E_START = 30, E_MAX = 100;
+const CLIMB_LO = 0.5, CLIMB_HI = 2.0;
+const DROP_PATIENCE = _preset.dropPatience;
+const DROP_BARS = _preset.dropBars;
+const DROP_PATIENCE_SAFE = Math.max(-35, Math.min(45, DROP_PATIENCE));
+const DROP_LO = 40 + DROP_PATIENCE_SAFE;
+const DROP_HI = Math.max(DROP_LO + 5, Math.min(100, 90 + DROP_PATIENCE_SAFE));
+const DROP_MAX_CHANCE = 0.18;
+const DROP_COOLDOWN = 4;
+const RELEASE_LO = 0.3, RELEASE_HI = 0.6;
+
+const SECS_PER_BAR = 240 / BPM;
+const SONG_MINUTES = _preset.songMinutes;
+const SECTION = Math.max(1, Math.round(_preset.sectionSeconds / (SECS_PER_BAR * BARS_PER_PHRASE)));
+const REST_CAP_MULT = 0.75;
+const SPARSE = _preset.sparse;
+
+function dropPhraseTarget(bars, roll) {
+  const phrases = Math.max(1, bars / BARS_PER_PHRASE);
+  return Math.max(1, Math.round(phrases * (0.75 + roll * 0.5)));
+}
+function avgBarsPerDrop(patience, dropBars) {
+  const pSafe = Math.max(-35, Math.min(45, patience));
+  const pLo = 40 + pSafe, pHi = Math.max(pLo + 5, Math.min(100, 90 + pSafe));
+  let s = 0x9e3779b9;
+  const lcg = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  let e = E_START, cool = 0, drop = false, bar = 0, lastDropBar = -1, dropLen = 0, dropTarget = 0;
+  const gaps = [];
+  for (let n = 0; n < 5000; n++) {
+    e = Math.min(E_MAX, e + CLIMB_LO + lcg() * (CLIMB_HI - CLIMB_LO));
+    let nowDrop = false;
+    if (drop) {
+      nowDrop = dropLen <= dropTarget;
+      if (!nowDrop) cool = DROP_COOLDOWN;
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - pLo) / (pHi - pLo)));
+      if (lcg() < ramp * DROP_MAX_CHANCE) {
+        nowDrop = true;
+        dropTarget = dropPhraseTarget(dropBars, lcg());
+        e = e * (1 - (RELEASE_LO + lcg() * (RELEASE_HI - RELEASE_LO)));
+      }
+    }
+    if (nowDrop && !drop) { if (lastDropBar >= 0) gaps.push(bar - lastDropBar); lastDropBar = bar; }
+    dropLen = nowDrop ? dropLen + 1 : 0;
+    drop = nowDrop;
+    bar += BARS_PER_PHRASE;
+  }
+  return gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : dropBars;
+}
+const SONG_DROPS = SONG_MINUTES > 0
+  ? Math.max(1, Math.round((SONG_MINUTES * 60) / (avgBarsPerDrop(DROP_PATIENCE, DROP_BARS) * SECS_PER_BAR)))
+  : 0;
+
+const _walk = [{ e: E_START, drop: false, cool: 0, song: 0, since: 0, dropLen: 0, dropTarget: 0 }];
+function phrase(i) {
+  return growChain(_walk, i, arr => {
+    const n = arr.length, p = arr[n - 1];
+    let e = Math.min(E_MAX, p.e + CLIMB_LO + rnd(4, n, 0) * (CLIMB_HI - CLIMB_LO));
+    let drop = false, cool = p.cool, song = p.song, since = p.since, dropLen = 0, dropTarget = p.dropTarget;
+    if (p.drop) {
+      dropLen = p.dropLen + 1;
+      drop = dropLen <= p.dropTarget;
+      if (!drop) cool = DROP_COOLDOWN;
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - DROP_LO) / (DROP_HI - DROP_LO)));
+      if (rnd(5, n, 0) < ramp * DROP_MAX_CHANCE) {
+        drop = true;
+        dropLen = 1;
+        dropTarget = dropPhraseTarget(DROP_BARS, rnd(6, n, 0));
+        e = e * (1 - (RELEASE_LO + rnd(7, n, 0) * (RELEASE_HI - RELEASE_LO)));
+        since += 1;
+        if (SONG_DROPS > 0 && since >= SONG_DROPS) { song += 1; since = 0; e = E_START; }
+      }
+    }
+    return { e, drop, cool, song, since, dropLen, dropTarget };
+  });
+}
+const songAtBar = bar => phrase(Math.floor(bar / BARS_PER_PHRASE)).song;
+const efrac = st => Math.max(0, Math.min(1, (st.e - E_START) / (E_MAX - E_START)));
+
+// ---- key/scale system - reused verbatim from Ship of Theseus. ----
+const KEY_MOVE_CHANCE = _preset.keyMoveChance;
+const KEY_RELATIVE_ODDS = 0.25;
+const MAX_KEY_DRIFT = 2;
+
+const PITCH_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
+const PHRYGIAN_SCALE = [0, 1, 3, 5, 7, 8, 10];
+const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
+const PHRYGIAN_CHANCE = _preset.phrygianChance;
+const _scaleFlavors = {};
+function scaleFlavorFor(song) {
+  if (_scaleFlavors[song] !== undefined) return _scaleFlavors[song];
+  return _scaleFlavors[song] = rnd(47, song, 0) < PHRYGIAN_CHANCE ? PHRYGIAN_SCALE : MINOR_SCALE;
+}
+
+function rootOf(num, mode) {
+  const base = (7 * (num - 1)) % 12;
+  return mode === 'm' ? (base + 9) % 12 : base;
+}
+function parseOpenKey(s) {
+  const m = String(s).trim().toLowerCase().match(/^(\d{1,2})([md])$/);
+  if (!m) return { num: 1, mode: 'm' };
+  return { num: Math.min(12, Math.max(1, +m[1])), mode: m[2] };
+}
+function keyName(k) {
+  return k.num + k.mode + ' (' + PITCH_NAMES[rootOf(k.num, k.mode)] + (k.mode === 'm' ? ' minor)' : ' major)');
+}
+function wheelDist(a, b) {
+  const d = Math.abs(a - b) % 12;
+  return Math.min(d, 12 - d);
+}
+
+const KEY_TYPED = parseOpenKey(OPEN_KEY);
+const NEW_SONG_KEY_DRIFT = 3;
+const _origins = {};
+function keyOriginFor(song) {
+  if (_origins[song]) return _origins[song];
+  if (song === 0) { _origins[0] = KEY_TYPED; return KEY_TYPED; }
+  const off = Math.floor(rnd(24, song, 0) * (NEW_SONG_KEY_DRIFT * 2 + 1)) - NEW_SONG_KEY_DRIFT;
+  const num = ((KEY_TYPED.num - 1 + off + 12) % 12) + 1;
+  const mode = rnd(25, song, 0) < 0.30 ? (KEY_TYPED.mode === 'm' ? 'd' : 'm') : KEY_TYPED.mode;
+  _origins[song] = { num, mode };
+  return _origins[song];
+}
+const KEY_ORIGIN = KEY_TYPED;
+const _keys = [KEY_TYPED];
+function keyAtPhrase(ph) {
+  return growChain(_keys, ph, arr => {
+    const n = arr.length, prev = arr[n - 1];
+    const home = keyOriginFor(phrase(n).song);
+    if (phrase(n).song !== phrase(n - 1).song) return home;
+    let next = prev;
+    if (n > 0 && !phrase(n).drop && phrase(n - 1).drop && rnd(18, n, 0) < KEY_MOVE_CHANCE) {
+      if (rnd(19, n, 0) < KEY_RELATIVE_ODDS) {
+        next = { num: prev.num, mode: prev.mode === 'm' ? 'd' : 'm' };
+      } else {
+        const dir = rnd(20, n, 0) < 0.5 ? -1 : 1;
+        const num = ((prev.num - 1 + dir + 12) % 12) + 1;
+        if (wheelDist(num, home.num) <= MAX_KEY_DRIFT) next = { num, mode: prev.mode };
+      }
+    }
+    return next;
+  });
+}
+function keyAtBar(bar) { return keyAtPhrase(Math.floor(bar / BARS_PER_PHRASE)); }
+function scaleAtBar(bar) {
+  const k = keyAtBar(bar);
+  const minorScale = scaleFlavorFor(songAtBar(bar));
+  return { root: rootOf(k.num, k.mode), steps: k.mode === 'm' ? minorScale : MAJOR_SCALE, key: k };
+}
+
+// ---- chord loop - kept from this project's own prior versions (no SoT
+// equivalent - SoT's stab/pad voices play one static chord off the
+// current scale root, no bar-to-bar progression). One chord per bar, one
+// loop template chosen per song. ----
+const CHORD_LOOP_TEMPLATES = _preset.chordLoopTemplates;
+const CHORD_LOOP_BAR_LEN = _preset.chordLoopBarLen;
+const _chordLoops = {};
+function chordLoopFor(song) {
+  if (_chordLoops[song]) return _chordLoops[song];
+  return _chordLoops[song] = weightedChoice(48, 0, 0, song, CHORD_LOOP_TEMPLATES).degs;
+}
+function chordDegreeAt(bar) {
+  const loop = chordLoopFor(songAtBar(bar));
+  return loop[Math.floor(bar / CHORD_LOOP_BAR_LEN) % loop.length];
+}
+
+function logKeySchedule(phrases) {
+  const secsPerPhrase = BARS_PER_PHRASE * (240 / BPM);
+  const out = ['key ' + keyName(KEY_ORIGIN) + ' - schedule for the next ' +
+               (phrases * secsPerPhrase / 60).toFixed(0) + ' min:'];
+  let prev = null;
+  for (let p = 0; p < phrases; p++) {
+    const k = keyAtPhrase(p);
+    if (!prev || k.num !== prev.num || k.mode !== prev.mode) {
+      const mins = p * secsPerPhrase / 60;
+      out.push('  ' + mins.toFixed(1) + ' min  ' + keyName(k) +
+               (prev ? '  (' + wheelDist(k.num, KEY_ORIGIN.num) + ' fifths from home)' : '  START'));
+      prev = k;
+    }
+  }
+  if (out.length === 1) out.push('  no key changes in this window - as intended');
+  console.log(out.join('\n'));
+}
+logKeySchedule(300);
+
+function logRiskCaps() {
+  const loPhrases = dropPhraseTarget(DROP_BARS, 0), hiPhrases = dropPhraseTarget(DROP_BARS, 1);
+  const loBars = loPhrases * BARS_PER_PHRASE, hiBars = hiPhrases * BARS_PER_PHRASE;
+  console.log('@ ' + MODE + ' ' + BPM + 'bpm (bassLeads:' + BASS_LEADS + '): breakdown runs ' + loBars + '-' + hiBars +
+    ' bars (' + (loBars * SECS_PER_BAR / 60).toFixed(1) + '-' + (hiBars * SECS_PER_BAR / 60).toFixed(1) +
+    ' min, centered on the researched ' + DROP_BARS + ')');
+}
+logRiskCaps();
+
+const HIT_HI = 0.97, HIT_LO = 0.02;
+function stepProfile(hits, steps) {
+  return Array.from({ length: steps }, (_, i) => hits.indexOf(i) >= 0 ? HIT_HI : HIT_LO);
+}
+
+// ============================================================
+//  -- kick+bass coupling - the direction flag this whole rebuild exists
+//  to make real. Generalizes SoT's "kick is the grid, bass avoids it" into
+//  a `bassLeads`-driven choice of which voice is the grid and whether the
+//  follower REINFORCES (coincides with) or avoids the leader - DnB always
+//  wants reinforce, never avoid, for either direction. ----
+// ============================================================
+const KICK_PATTERN = _preset.kickPattern;
+const BASS_PATTERN = _preset.bassPattern;
+
+// The lead voice's own hit positions, computed EXACTLY ONCE, deterministically
+// when its own deterministic flag is set - the single source every
+// follower-profile and every render of the lead voice itself both read.
+// This is the fix for the SoT latent-bug class named in this file's own
+// top comment: never re-derive "what does the lead voice actually hit"
+// via a second, independent (and possibly disagreeing) computation.
+function leadStepsFor(pattern, deterministic) {
+  const profile = stepProfile(pattern, STEPS);
+  // kind:71, not kind:0 - checked, not assumed: kind 0 is origFor()'s own
+  // per-voice origin-roll kind (offset by vi*997 there), and kick's own vi
+  // is 0, so a plain rnd(0, s, 0) here would land in the exact same
+  // (kind, a, b) domain as kick's own origin roll whenever kick is the
+  // FOLLOWER (dnbHalftime, bass leads non-deterministically) - the same
+  // "two computations, one shared stream" issue `origOverride` above
+  // exists to prevent, just one level removed (this only matters for
+  // voices origOverride does NOT apply to, i.e. the follower, which still
+  // needs its OWN independent roll, uncorrelated with the leader's).
+  return deterministic
+    ? profile.map(p => p >= 0.5)
+    : profile.map((p, s) => rnd(71, s, 0) < p);
+}
+const KICK_DETERMINISTIC = _preset.kickDeterministic;
+const BASS_DETERMINISTIC = _preset.bassDeterministic;
+const LEAD_STEPS = BASS_LEADS
+  ? leadStepsFor(BASS_PATTERN, BASS_DETERMINISTIC)
+  : leadStepsFor(KICK_PATTERN, KICK_DETERMINISTIC);
+
+// Follower's own profile: high probability exactly where the lead voice
+// hits (reinforce/coincide), near-zero elsewhere - a real ghost mechanism
+// (below, in VOICES) adds independent movement into the leader's gaps on
+// top of this.
+function reinforceProfile(reinforceRate, leadSteps) {
+  return leadSteps.map(isHit => isHit ? reinforceRate : HIT_LO);
+}
+const KICK_BEAT1_CHANCE = _preset.kickBeat1Chance;
+
+let kickProfileArr, bassProfileArr;
+if (BASS_LEADS) {
+  bassProfileArr = stepProfile(BASS_PATTERN, STEPS);
+  kickProfileArr = reinforceProfile(_preset.kickReinforce, LEAD_STEPS);
+  // Beat 1 as kick's own anchor is close to a universal drum-programming
+  // convention, independent of whatever the bass pattern happens to do at
+  // step 0 - folded directly into the follower's own profile (not a
+  // separate bespoke mechanism) so it goes through the exact same
+  // skeleton/drift machinery as everything else.
+  kickProfileArr[0] = Math.max(kickProfileArr[0], KICK_BEAT1_CHANCE);
+} else {
+  kickProfileArr = stepProfile(KICK_PATTERN, STEPS);
+  bassProfileArr = reinforceProfile(_preset.bassReinforce, LEAD_STEPS);
+}
+
+// ============================================================
+//  -- ghost/wander - reused formula from Ship of Theseus (same
+//  WANDER_LO/HI, MAX_GHOST values). Adds occasional extra hits between
+//  skeleton hits, scaled by energy and boosted right before a real hit
+//  ("pickup"). ----
+// ============================================================
+const MAX_GHOST = 0.35, WANDER_LO = 0.15, WANDER_HI = 0.85;
+const PICKUP_BIAS = 1.70, PICKUP_ELSE = 0.72;
+function isPhraseEndBar(bar) { return bar % BARS_PER_PHRASE === BARS_PER_PHRASE - 1; }
+function phraseEndBoost(bar, boost) { return isPhraseEndBar(bar) ? boost : 1; }
+
+function nudgeSec(ms) { return (ms / 1000) / SECS_PER_BAR; }
+function applyNudge(pat, ms) { return !ms ? pat : pat.late(nudgeSec(ms)); }
+
+// ============================================================
+//  -- break-ghost templates (dnb only, useBreakTemplates gate) - v2's real
+//  fix, carried into the new architecture unchanged. See MODE_PRESETS.dnb's
+//  own comment on breakGhostTemplates for the full reasoning. ----
+// ============================================================
+const _breakGhostTemplate = {};
+function breakGhostTemplateFor(bar, templates) {
+  if (_breakGhostTemplate[bar] !== undefined) return _breakGhostTemplate[bar];
+  return _breakGhostTemplate[bar] = weightedChoice(49, 0, 0, bar, templates).ghosts;
+}
+
+// ============================================================
+//  -- ride roll-burst generator (rollOn gate) - this project's own
+//  machinery, no SoT equivalent. Roll length drawn ONCE per trigger from a
+//  small bounded set - never a repeated "one more hit?" coin-flip. A roll
+//  can span multiple beats. ----
+// ============================================================
+function rollSubsteps(n) {
+  if (n === 6) return [0, 1, 2, 4, 5, 6];
+  return Array.from({ length: n }, (_, i) => i);
+}
+function rollAt(bar, beatIdx, maxLen, cfg) {
+  if (!cfg.rideOn) return null;
+  const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+  const boost = beatIdx >= 2 ? phraseEndBoost(bar, cfg.rollPhraseEndMult) : 1;
+  const chance = cfg.rollBaseChance * boost * (0.5 + efrac(st) * 0.5);
+  if (rnd(40, bar, beatIdx) >= chance) return null;
+  const valid = cfg.rollLengths.filter(o => o.n <= maxLen);
+  if (!valid.length) return null;
+  const totalW = valid.reduce((a, o) => a + o.w, 0);
+  const roll = rnd(41, bar, beatIdx) * totalW;
+  let acc = 0;
+  for (const opt of valid) { acc += opt.w; if (roll < acc) return opt.n; }
+  return valid[valid.length - 1].n;
+}
+const _rollSchedules = {};
+function rollScheduleFor(bar, cfg) {
+  if (_rollSchedules[bar]) return _rollSchedules[bar];
+  const windows = [];
+  let beatIdx = 0;
+  while (beatIdx < 4) {
+    const maxLen = (4 - beatIdx) * 8;
+    const n = rollAt(bar, beatIdx, maxLen, cfg);
+    if (n) { windows.push({ start: beatIdx * 8, n }); beatIdx += Math.ceil(n / 8); }
+    else beatIdx += 1;
+  }
+  return _rollSchedules[bar] = windows;
+}
+function rollWindowAt(bar, sub, cfg) {
+  for (const w of rollScheduleFor(bar, cfg)) if (sub >= w.start && sub < w.start + w.n) return w;
+  return null;
+}
+
+// ============================================================
+//  VOICES - Ship of Theseus's own architecture: one declarative config
+//  object per voice, one generic voicePattern() renders any of them. See
+//  voicePattern() below for what each field actually does.
+// ============================================================
+const VOICES = [
+  { name: 'kick', note: 36, chan: drumChan,
+    drift: BASS_LEADS ? _preset.kickReinforceDrift : _preset.kickDrift,
+    deterministic: BASS_LEADS ? false : KICK_DETERMINISTIC,
+    // origOverride when kick leads (!BASS_LEADS) - see origFor()'s own
+    // comment for why this has to be the SAME array LEAD_STEPS already is,
+    // not a fresh roll from the same profile.
+    origOverride: BASS_LEADS ? undefined : LEAD_STEPS,
+    rest: BASS_LEADS ? 0 : _preset.kickRest,
+    ghost: _preset.kickGhost, fillBoost: _preset.kickFillBoost,
+    dropsOut: _preset.kickDropsOut,
+    profile: kickProfileArr,
+    vel: [0.85, 0.95] },
+
+  { name: 'snare', notes: [38, 40], chan: drumChan,
+    drift: _preset.snareDrift, deterministic: _preset.snareDeterministic, rest: _preset.snareRest,
+    ghost: _preset.snareGhost, fillBoost: _preset.snareFillBoost,
+    kitDriftScale: _preset.kitDriftScale, kitGhostScale: _preset.kitGhostScale,
+    dropsOut: _preset.kickDropsOut, // kick+snare are one rhythmic unit, same as trap/dub/dubstep sibling convention
+    nudge: _preset.snareNudgeMs,
+    useBreakTemplates: _preset.useBreakTemplates, breakGhostTemplates: _preset.breakGhostTemplates,
+    profile: stepProfile(_preset.snarePattern, STEPS),
+    vel: [0.82, 0.95] },
+
+  { name: 'ride', note: 51, chan: drumChan, steps: RIDE_STEPS,
+    drift: _preset.rideDrift, deterministic: _preset.rideDeterministic, rest: _preset.rideRest,
+    ghost: 0, // no generic ghost mechanism - the roll IS ride's variation mechanism
+    dropsOut: false, // ride stays standing through a breakdown
+    swing: true, // the one deliberate per-voice swing departure from SoT - see this file's top comment
+    rollOn: _preset.rideOn, rollBaseChance: _preset.rollBaseChance,
+    rollPhraseEndMult: _preset.rollPhraseEndMult, rollLengths: _preset.rollLengths,
+    // v6 - the Amen break's own "open hi-hat replaces the ride on the & of
+    // 3 in the last bar" detail, dnb only (GM 46, open hi-hat). See
+    // voicePattern()'s own openAt() comment for the mechanism.
+    openNote: _preset.rideOpenOn ? 46 : undefined,
+    openStep: 20, // "and" of beat 3 on the 32-grid: beat 3 = step 16, + one 8th-note (4 32nd-steps) = 20
+    profile: Array.from({ length: RIDE_STEPS }, (_, i) => _preset.rideBaseSubsteps.indexOf(i % 8) >= 0 ? HIT_HI : HIT_LO),
+    vel: [0.55, 0.70] },
+
+  { name: 'bass', chan: bassChan, pitched: true,
+    drift: BASS_LEADS ? _preset.bassDrift : _preset.bassReinforceDrift,
+    deterministic: BASS_LEADS ? BASS_DETERMINISTIC : false,
+    // origOverride when bass leads - see kick's own copy of this comment above.
+    origOverride: BASS_LEADS ? LEAD_STEPS : undefined,
+    rest: BASS_LEADS ? _preset.bassRest : 0,
+    ghost: BASS_LEADS ? 0 : _preset.bassGhost, fillBoost: _preset.bassFillBoost,
+    dropsOut: true, // bass always drops with the beat, both directions
+    pitchOctave: _preset.bassOctave, pitchChoices: _preset.bassChoices, pitchChoicesEnd: _preset.bassChoicesEnd,
+    legato: true, // rings until just before the next scheduled hit - the "boom under everything" mechanic
+    profile: bassProfileArr,
+    vel: [0.75, 0.95] },
+
+  { name: 'motif', chan: leadChan, role: 'motif',
+    include: _preset.motifOn,
+    clip: _preset.motifClip, vel: [0.60, 0.80] },
+];
+
+// ============================================================
+//  -- generic per-voice skeleton+drift+rest+ghost mechanism - Ship of
+//  Theseus's own voicePattern(), adapted: `deterministic` is its own flag
+//  decoupled from `drift` (see this file's top comment for why), ghost's
+//  phrase-end boost uses this file's own `fillBoost` field name, and two
+//  bespoke per-voice extensions are layered on before the generic path:
+//  `v.useBreakTemplates` (snare, dnb only) and `v.rollOn` (ride only). ----
+// ============================================================
+const DRIFT_CHANCE = 0.5, MAX_DRIFT = 3;
+const PROFILE_DRIFT_CHANCE = 0.20, PROFILE_DRIFT_AMOUNT = 0.05, PROFILE_DRIFT_BAND = 0.25;
+
+function motifVoicePattern(v, vi) {
+  const MOTIF_CHORD = [0, 2, 4];
+  const MOTIF_POS = [0, 4, 6, 8, 12, 14];
+  const MOTIF_STRONG = [0, 8];
+  const MOTIF_N_LO = _preset.motifNoteRange[0], MOTIF_N_HI = _preset.motifNoteRange[1];
+  const MOTIF_CYCLE = _preset.motifCycle;
+  const MOTIF_OCTAVE = _preset.motifOctave;
+
+  function motifSpread(total, moves, id, salt) {
+    const out = new Array(moves).fill(1);
+    let extra = total - moves;
+    for (let k = 0; extra > 0 && k < 50; k++) {
+      const i = Math.floor(rnd(40 + salt, id * 7 + k, 0) * moves);
+      if (out[i] < 3) { out[i]++; extra--; }
+    }
+    return out;
+  }
+  function motifChordTone(target, lo, hi) {
+    let best = null, bd = 99;
+    for (let o = -2; o <= 3; o++) for (const c of MOTIF_CHORD) {
+      const val = c + o * 7;
+      if (val < lo || val > hi) continue;
+      const d = Math.abs(val - target);
+      if (d < bd) { bd = d; best = val; }
+    }
+    return best === null ? target : best;
+  }
+  const _motifs = {};
+  function motifFor(id) {
+    if (_motifs[id]) return _motifs[id];
+    const n = MOTIF_N_LO + Math.floor(rnd(30, id, 0) * (MOTIF_N_HI - MOTIF_N_LO + 1));
+    const peakLo = Math.floor((n - 1) / 2) + 1;
+    const peakHi = n - 2;
+    const peakIdx = peakHi >= peakLo
+      ? peakLo + Math.floor(rnd(31, id, 0) * (peakHi - peakLo + 1))
+      : Math.max(1, peakHi);
+    const riseMoves = peakIdx, fallMoves = n - 1 - peakIdx;
+    const start = MOTIF_CHORD[Math.floor(rnd(32, id, 0) * MOTIF_CHORD.length)];
+    const rise = riseMoves + Math.floor(rnd(33, id, 0) * 3);
+    const peak = start + rise;
+    const endTarget = peak - (fallMoves + Math.floor(rnd(34, id, 0) * 3));
+    const end = fallMoves > 0 ? motifChordTone(endTarget, start - 4, peak - 1) : peak;
+
+    const degs = [start];
+    motifSpread(rise, riseMoves, id, 0).forEach(m => degs.push(degs[degs.length - 1] + m));
+    if (fallMoves > 0) {
+      motifSpread(Math.max(peak - end, fallMoves), fallMoves, id, 5)
+        .forEach(m => degs.push(degs[degs.length - 1] - m));
+      degs[degs.length - 1] = end;
+    }
+    const pool = MOTIF_POS.slice(1), chosen = [0];
+    for (let i = 0; i < n - 1; i++) {
+      let p = pool[Math.floor(rnd(35, id, i) * pool.length)], guard = 0;
+      while (chosen.indexOf(p) >= 0 && guard++ < 12) p = pool[Math.floor(rnd(36, id, i * 13 + guard) * pool.length)];
+      if (chosen.indexOf(p) < 0) chosen.push(p);
+    }
+    chosen.sort((a, b) => a - b);
+    while (chosen.length < degs.length) degs.pop();
+    if (peakIdx < chosen.length) {
+      let best = chosen[peakIdx], bd = 99;
+      for (const stp of MOTIF_STRONG) {
+        if (chosen.indexOf(stp) >= 0 && stp !== chosen[peakIdx]) continue;
+        const prev = peakIdx > 0 ? chosen[peakIdx - 1] : -1;
+        const nxt = peakIdx + 1 < chosen.length ? chosen[peakIdx + 1] : 99;
+        const d = Math.abs(stp - chosen[peakIdx]);
+        if (stp > prev && stp < nxt && d < bd) { bd = d; best = stp; }
+      }
+      chosen[peakIdx] = best;
+    }
+    let d2 = degs.slice(0, chosen.length);
+    const top = Math.max.apply(null, d2);
+    if (top > 6) { const sh = top - 6; d2 = d2.map(x => x - sh); }
+    const bot = Math.min.apply(null, d2);
+    if (bot < 0) d2 = d2.map(x => x - bot);
+    _motifs[id] = { steps: chosen, degs: d2 };
+    return _motifs[id];
+  }
+  function motifNoteAt(step, bar) {
+    if (!v.include) return null;
+    const inCycle = ((bar % MOTIF_CYCLE) + MOTIF_CYCLE) % MOTIF_CYCLE;
+    if (inCycle > 1) return null;
+    const sec = Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+    const m = motifFor(songAtBar(bar) * 977 + sec);
+    const pos = inCycle * STEPS + step;
+    const i = m.steps.indexOf(pos);
+    if (i < 0) return null;
+    const statement = Math.floor(bar / MOTIF_CYCLE);
+    let deg = m.degs[i];
+    if (statement % 2 === 1 && i === m.degs.length - 1) deg = motifChordTone(deg - 2, 0, 6);
+    return deg;
+  }
+
+  const gate = sig(t => { const [step, bar] = stepBar(t); return motifNoteAt(step, bar) !== null; }).segment(STEPS);
+  const noteSig = sig(t => {
+    const [step, bar] = stepBar(t);
+    const sc = scaleAtBar(bar);
+    const noteDeg = motifNoteAt(step, bar);
+    const d = noteDeg === null ? 0 : noteDeg;
+    const o = Math.floor(d / 7), ix = ((d % 7) + 7) % 7;
+    // chord-loop offset (this project's own addition, kept - see this
+    // file's own comment on chordDegreeAt above) - SoT's own motif never
+    // had this, since SoT has no chord-progression layer at all.
+    const chordDeg = chordDegreeAt(bar);
+    return MOTIF_OCTAVE + sc.root + sc.steps[(ix + chordDeg) % 7] + 12 * o;
+  }).segment(STEPS);
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    return v.vel[0] + rnd(2, vi * 997 + step, bar) * (v.vel[1] - v.vel[0]);
+  }).segment(STEPS);
+  const out = note(noteSig).struct(gate).velocity(vel);
+  return v.clip !== undefined ? out.clip(v.clip) : out;
+}
+
+function voicePattern(v, vi) {
+  if (v.role === 'motif') return motifVoicePattern(v, vi);
+
+  const steps = v.steps || STEPS;
+  const nn = v.notes ? v.notes[Math.floor(rnd(15, vi, 0) * v.notes.length) % v.notes.length] : v.note;
+  const len = v.profile.length;
+  const maxDrift = Math.max(1, Math.min(MAX_DRIFT, Math.floor(len / 3)));
+
+  const _origs = {};
+  function origFor() {
+    if (_origs[0]) return _origs[0];
+    // v.origOverride (whichever of kick/bass is the LEAD voice - see
+    // "kick+bass coupling" above): reads LEAD_STEPS directly instead of
+    // re-rolling. This is the fix for the exact bug class this rebuild's
+    // top comment names - without it, the follower's reinforce profile
+    // (built from LEAD_STEPS) and the lead voice's own rendered pattern
+    // (this roll) would be two independent computations of the same fact,
+    // free to disagree whenever the lead voice is non-deterministic
+    // (dnbHalftime's bass) - found by auditing this file's own rnd() kind
+    // usage before trusting it, not assumed safe by construction.
+    if (v.origOverride) return _origs[0] = v.origOverride;
+    const o = v.deterministic
+      ? v.profile.map(p => p >= 0.5)
+      : v.profile.map((p, s2) => rnd(0, vi * 997 + s2, 0) < p);
+    if (!o.some(Boolean)) {
+      const peak = Math.max.apply(null, v.profile);
+      const strong = [];
+      v.profile.forEach((p, s2) => { if (p >= peak / 2) strong.push(s2); });
+      o[strong[Math.floor(rnd(22, vi, 0) * strong.length) % strong.length]] = true;
+    }
+    return _origs[0] = o;
+  }
+
+  const driftAmt = v.drift * (v.kitDriftScale !== undefined ? v.kitDriftScale : 1);
+  const ghostAmt = v.ghost * (v.kitGhostScale !== undefined ? v.kitGhostScale : 1);
+
+  const _profiles = [];
+  function profileAt(sec) {
+    const chain = _profiles.length ? _profiles : (_profiles.push(v.profile.slice()), _profiles);
+    return growChain(chain, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(26, vi, n) < PROFILE_DRIFT_CHANCE * driftAmt) {
+        const step = Math.floor(rnd(27, vi, n) * len) % len;
+        const dir = rnd(28, vi * 997 + step, n) < 0.5 ? -1 : 1;
+        const base = v.profile[step];
+        const lo = Math.max(0, base - PROFILE_DRIFT_BAND);
+        const hi = Math.min(1, base + PROFILE_DRIFT_BAND);
+        const nudged = Math.max(lo, Math.min(hi, prev[step] + dir * PROFILE_DRIFT_AMOUNT));
+        if (nudged !== prev[step]) { next = prev.slice(); next[step] = nudged; }
+      }
+      return next;
+    });
+  }
+  const _chains = [origFor()];
+  function skelAt(sec) {
+    return growChain(_chains, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(8, vi, n) < DRIFT_CHANCE * driftAmt) {
+        const step = Math.floor(rnd(9, vi, n) * len) % len;
+        const val = rnd(10, vi * 997 + step, n) < profileAt(n)[step];
+        if (val !== prev[step]) {
+          const cand = prev.slice(); cand[step] = val;
+          let d = 0;
+          for (let i = 0; i < len; i++) if (cand[i] !== _chains[0][i]) d++;
+          if (d <= maxDrift) next = cand;
+        }
+      }
+      return next;
+    });
+  }
+  const restChance = Math.max(0, Math.min(0.75, (v.rest || 0) * SPARSE));
+  const maxRestStreak = Math.max(1, Math.ceil(REST_CAP_MULT / (1 - restChance)));
+  const _restsChain = [];
+  function restsAtSection(sec) {
+    return growChain(_restsChain, sec, arr => {
+      const n = arr.length;
+      let streak = 0;
+      for (let i = n - 1; i >= 0 && arr[i]; i--) streak++;
+      const forced = streak >= maxRestStreak;
+      return !forced && rnd(23, vi, n) < restChance;
+    });
+  }
+  const secOf = bar => Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const idxAt = (step, bar) => (bar * steps + step) % len;
+  const hitAt = (step, bar) => skelAt(secOf(bar))[idxAt(step, bar)];
+  const restsAt = bar => restChance > 0 && restsAtSection(secOf(bar));
+  const isPickup = (step, bar) => skelAt(secOf(bar))[(idxAt(step, bar) + 1) % len];
+
+  // v6 (ride, dnb only) - the Amen break's own documented detail: the open
+  // hi-hat REPLACES the ride specifically on the "and" of beat 3, and only
+  // in the LAST bar of a phrase (isPhraseEndBar, already used elsewhere in
+  // this file for roll/ghost boosts - same phrase-boundary concept, not a
+  // new one). "Replaces" is a hard, deterministic structural fact in the
+  // citation, not a probabilistic accent - so this forces a hit and swaps
+  // the note at that one exact (step, bar) combination, ahead of the roll/
+  // base-pattern/rest logic below, not layered probabilistically on top of
+  // it. No SoT equivalent for the phrase-position gating (SoT's own
+  // openPattern mechanism fires every bar uniformly, with no "only in the
+  // last bar" concept) - this file's own small, deliberate extension.
+  const openAt = (step, bar) => !!v.openNote && step === v.openStep && isPhraseEndBar(bar);
+
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t, steps);
+    if (openAt(step, bar)) return true;
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (v.dropsOut && st.drop) return false;
+
+    // Ride's roll-burst - checked BEFORE the generic skeleton path, since
+    // an active roll window overrides the base pattern entirely. No SoT
+    // equivalent - see this file's top comment.
+    if (v.rollOn) {
+      const w = rollWindowAt(bar, step, v);
+      if (w) return rollSubsteps(w.n).indexOf(step - w.start) >= 0;
+    }
+
+    if (restsAt(bar)) return false;
+    if (hitAt(step, bar)) return true;
+
+    // Snare's break-ghost templates (dnb only) - replaces the generic
+    // ghost mechanism entirely for this voice when set, since the generic
+    // isPickup()-based mechanism has a hard ceiling (can only reach the
+    // step immediately before a REAL hit in this voice's OWN skeleton) it
+    // can never get past - see MODE_PRESETS.dnb's own comment.
+    if (v.useBreakTemplates) return breakGhostTemplateFor(bar, v.breakGhostTemplates).indexOf(step) >= 0;
+
+    if (!ghostAmt) return false;
+    const w2 = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
+    const shaped = w2 * MAX_GHOST * ghostAmt * phraseEndBoost(bar, v.fillBoost || 1) *
+                   (isPickup(step, bar) ? PICKUP_BIAS : PICKUP_ELSE);
+    // kind:60+vi - own independent stream per voice (the v4 fix this
+    // rebuild carries forward: kick/snare/bass ghost rolls must never
+    // share a stream). Base 60 chosen deliberately clear of every other
+    // kind literal this file uses (checked, not assumed - the highest
+    // fixed kind anywhere else in this file is 49, and 1+vi would have
+    // collided with kind 4's own separate use in phrase()'s energy climb
+    // for bass specifically, vi=3 - found by auditing every rnd() call
+    // site before trusting the scheme, not caught by inspection alone).
+    return rnd(60 + vi, step, bar) < shaped;
+  }).segment(steps);
+
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t, steps);
+    if (openAt(step, bar)) return 0.65 + rnd(2, vi * 997 + step, bar) * 0.10; // a real accent, not buried under the base pattern's own quieter off-beat velocity
+    if (v.rollOn) {
+      const w = rollWindowAt(bar, step, v);
+      if (w) {
+        const active = rollSubsteps(w.n);
+        const pos = active.indexOf(step - w.start);
+        const frac = pos / Math.max(1, active.length - 1);
+        return 0.45 + frac * 0.50 + rnd(2, step, bar) * 0.05;
+      }
+    }
+    if (hitAt(step, bar)) {
+      const inBeat = v.steps === RIDE_STEPS ? step % 8 : null;
+      const accent = inBeat === null ? 1 : (inBeat === 0 ? 1.0 : 0.7);
+      return (v.vel[0] + rnd(2, vi * 997 + step, bar) * (v.vel[1] - v.vel[0])) * accent;
+    }
+    return (v.vel[0] * 0.5) + rnd(3, vi * 997 + step, bar) * (v.vel[0] * 0.5 - 0.05);
+  }).segment(steps);
+
+  const noteSig = v.pitched
+    ? sig(t => {
+        const [step, bar] = stepBar(t, steps);
+        const sc = scaleAtBar(bar);
+        const choices = isPhraseEndBar(bar) ? v.pitchChoicesEnd : v.pitchChoices;
+        const c = weightedChoice(21, vi, step, secOf(bar), choices);
+        const chordDeg = chordDegreeAt(bar);
+        return v.pitchOctave + sc.root + sc.steps[(c.idx + chordDeg) % 7] + 12 * c.oct;
+      }).segment(steps)
+    : v.openNote
+      ? sig(t => { const [step, bar] = stepBar(t, steps); return openAt(step, bar) ? v.openNote : nn; }).segment(steps)
+      : nn;
+
+  if (!v.pitched) return applyNudge(note(noteSig).struct(gate).velocity(vel), v.nudge);
+
+  if (!v.legato) return note(noteSig).struct(gate).velocity(vel);
+
+  // Legato bass: rings until just before the NEXT scheduled hit in ITS OWN
+  // pattern, computed by asking the SAME gate function this voice's own
+  // gate above answers - not an independent re-derivation. This is the
+  // exact bug class this project's own v4 fix corrected (a duplicated
+  // gate/clip computation quietly disagreeing); this rebuild has exactly
+  // one function answering "is there a hit here," referenced by both gate
+  // and clip, so it structurally cannot happen again.
+  function hitAtWithGhost(step, bar) {
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (v.dropsOut && st.drop) return false;
+    if (restsAt(bar)) return false;
+    if (hitAt(step, bar)) return true;
+    if (!ghostAmt) return false;
+    const w2 = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
+    const shaped = w2 * MAX_GHOST * ghostAmt * phraseEndBoost(bar, v.fillBoost || 1) *
+                   (isPickup(step, bar) ? PICKUP_BIAS : PICKUP_ELSE);
+    return rnd(60 + vi, step, bar) < shaped; // MUST match the gate's own kind above (60+vi) - same "one shared answer" principle as this function existing at all
+  }
+  const clipSig = sig(t => {
+    const [step, bar] = stepBar(t, steps);
+    let dist = 1;
+    for (let k = 1; k <= steps; k++) {
+      const s2 = (step + k) % steps, b2 = bar + Math.floor((step + k) / steps);
+      if (hitAtWithGhost(s2, b2)) { dist = k; break; }
+    }
+    return dist * 0.95;
+  }).segment(steps);
+  return note(noteSig).struct(gate).velocity(vel).clip(clipSig);
+}
+
+// ============================================================
+//  -- final assembly --
+// ============================================================
+// Swing applies per-VOICE (v.swing), not per-channel like Ship of Theseus -
+// see this file's own top comment for why. SWING is computed per-voice
+// from that voice's own preset field (only ride sets swingPct/swingGrid
+// meaningfully; every other voice's swing amount would be a placeholder
+// it never reads, so it's simplest to just always use the ride's own
+// preset fields here since ride is the only voice that ever sets
+// v.swing:true).
+const SWING_PCT = _preset.swingPct, SWING_GRID = _preset.swingGrid;
+const SWING = (SWING_PCT - 50) / 50;
+const withSwing = p => SWING > 0 ? p.swingBy(SWING, SWING_GRID) : p;
+
+const chanOf = v => v.chan !== undefined ? v.chan : drumChan;
+const usedChans = VOICES.map(chanOf).filter((c, i, a) => a.indexOf(c) === i).sort((a, b) => a - b);
+
+stack(
+  ...usedChans.map(ch => {
+    const voicesOnChan = VOICES.filter(v => chanOf(v) === ch);
+    const layers = voicesOnChan.map(v => {
+      const p = voicePattern(v, VOICES.indexOf(v));
+      return v.swing ? withSwing(p) : p;
+    });
+    return stack(...layers).midichan(ch);
+  })
+).midi(midi)
