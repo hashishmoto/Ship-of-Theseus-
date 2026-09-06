@@ -1,0 +1,2504 @@
+// THE SHIP OF THESEUS - dev, NO VOICE fork (fully commented) - v71 (live file synced this version)
+// Forked from "SoT dev.js" v34 with the entire voice channel (4, AlterEgo)
+// and everything only it needed removed: the voicePresence/voicePattern/
+// voiceSwing/leadTrade/voiceSyllableMs/voiceRest fields, the syllable-scheme
+// machinery, motif/voice trading. Five channels instead of six: drums(1),
+// bass(2), chord/pluck(3), motif(5), pad(6). This fork has its OWN version
+// history starting at v1 - it does not track the main dev.js/live.js pair.
+// Annotated twin of "SoT live (no voice).js" - same engine, same values,
+// comments explain how the code works and why. Edit here, then mirror
+// value changes into the live file (or ask Claude to do it).
+// ============================================================
+//  Everything you touch mid-set is in this block. Nothing below it.
+//  Ctrl+Enter to apply. Same SEED = seamless. Stop+Play = back to zero.
+// ============================================================
+
+const midi = 'IAC Driver Bus 1';   // your MIDI port
+
+// -- the two you will actually reach for -------------------------
+// MAX_OPTIONAL and DROP_PATIENCE are mode-driven (maxOptional/dropPatience
+// in MODE_PRESETS below), not top-level dials - every genre wants a
+// different kit density and breakdown character, so a flat global value
+// can't fit all of them. Override either per set without switching modes:
+// MODE_OVERRIDES = { maxOptional: N, dropPatience: N }.
+// DROP_PATIENCE has diminishing returns above ~15: DROP_HI clamps at 100
+// once patience passes ~10, so the drop-chance window gets NARROWER as
+// patience climbs even though the climb-to-it takes longer - past that
+// point the number keeps changing but the behavior barely does.
+const SEED          = 23;    // track change. New kit, new patterns, new drops.
+const OPEN_KEY      = '4m'; // key, as your DJ software shows it. 1m = A minor.
+
+// -- tempo --------------------------------------------------------
+// Typical ranges by genre, sorted low to high:
+//   downtempo  98-105  (per a production spec the user supplied - see the
+//              "downtempo" entry in MODE_PRESETS below for full sourcing)
+//   dubtechno 115-125  house     120-125  minimal   120-125
+//   techno    125-135  trance    132-140
+//   psy       125-150 (v50, was 138-148 - real evidence: "tempos generally
+//             ranging from 125 to 150 BPM," wider and lower than the
+//             previous unsourced range)
+const BPM = 120;
+// Glide to a new BPM over this many seconds instead of snapping on the next
+// Ctrl+Enter. 0 = old behavior, instant change. State lives on globalThis
+// because this whole script re-runs from scratch on every Ctrl+Enter - a
+// plain top-level variable would forget what BPM you were actually at.
+const BPM_RAMP_SECONDS = 8;
+
+if (typeof setcpm !== 'undefined') {
+  const _tempo = (globalThis.__sotTempo = globalThis.__sotTempo || { bpm: undefined, timer: null });
+  if (_tempo.timer) { clearInterval(_tempo.timer); _tempo.timer = null; }
+  if (_tempo.bpm === undefined || BPM_RAMP_SECONDS <= 0 || _tempo.bpm === BPM) {
+    _tempo.bpm = BPM;
+    setcpm(BPM / 4);
+  } else {
+    const fromBpm = _tempo.bpm, toBpm = BPM, stepMs = 100;
+    const steps = Math.max(1, Math.round(BPM_RAMP_SECONDS * 1000 / stepMs));
+    let step = 0;
+    _tempo.timer = setInterval(() => {
+      step += 1;
+      const t = Math.min(1, step / steps);
+      _tempo.bpm = fromBpm + (toBpm - fromBpm) * t;
+      setcpm(_tempo.bpm / 4);
+      if (t >= 1) { clearInterval(_tempo.timer); _tempo.timer = null; }
+    }, stepMs);
+  }
+}
+
+// -- mode -------------------------------------------------------
+// Bundles kick/clap pattern, scale flavor, hats, swing, bass and motif
+// phrasing into one genre switch. Pick a name, or 'custom' to hand-tune
+// every field yourself in MODE_PRESETS.custom below.
+//   techno  = the original sound - 4x4 kick, natural minor, rolling bass
+//   minimal = tight/sparse core kit, syncopated bass, real human groove
+//             (not mechanical), light bounce - Robert Hood lineage +
+//             minimal house/microhouse, not the diluted later usage
+//   psy     = harmonic minor, rolling hats, straight swing, rolling 16th bass
+//   house   = 4x4 kick, syncopated bass, moderate swing - the classic pump
+//   trance  = 4x4 kick, rolling bass, fuller arrangement, clean 4-bar riff
+//             loop (try OPEN_KEY in major/'d' mode for the classic uplifting
+//             sound - e.g. '8d' instead of '8m')
+//   dubtechno = sparse kick, no clap, sparse sub, lots of rest, kit already
+//             stripped to maxOptional:1 below
+//   downtempo = purely rhythmic/bass mode built from a production spec the
+//             user supplied directly (exact kick/clap/hat/sub-bass grid,
+//             tempo, gate lengths, arrangement) - no motif/stab/pad, two new
+//             voices instead (pluck, perc - see "-- pluck --"/"-- perc --"
+//             below). Honest gap: the spec's per-instrument micro-timing
+//             (independent ms offsets per voice and per 16th-parity) and its
+//             fixed bar-scripted arrangement have no engine equivalent - see
+//             the long comment on the downtempo preset itself for why, and
+//             what's approximated instead.
+//
+// This fork previously carried dub, dubstep, dnb, and trap modes. All four
+// are bass-driven genres (the bass/808/sub-line is the actual rhythmic
+// backbone, kick reinforces or drops out) forced through an engine whose
+// whole architecture is kick-driven (kick decided first, songStable, bass
+// told to avoid its steps) - every one of them needed an honest "texture,
+// not a full emulation" caveat as a result (dub's was the most explicit).
+// Removed on purpose, not lost: all four now have a proper 808/bass-first
+// home in the standalone "Bass Engine dev.js"/"Bass Engine live.js" sibling
+// project (folder: "Bass Engine", renamed from "Trap" once that name
+// stopped fitting a four-genre project and started causing real confusion
+// with this project's own "dubtechno" mode). This fork's job from here is
+// to be as good as possible at the kick-driven genres it actually fits,
+// not to cover every genre by caveat.
+const MODE = 'dubtechno';
+
+// Nudge ONE field away from the chosen mode's preset without switching modes
+// or going full custom - e.g. MODE_OVERRIDES = { kickPattern: 'triplet' }.
+// Field names match the keys in MODE_PRESETS below. Leave {} to use the
+// mode's preset untouched.
+const MODE_OVERRIDES = {};
+
+// motifOn/stabOn/padOn: whether this genre wants the arch-shaped synth lead
+// (channel 5), chord stabs (channel 3), and/or the sustained pad (channel 6)
+// at all - each is a genuine per-genre on/off, not a global switch.
+// Per-mode fields, quick reference (values are in the table below):
+//   dropPatience  - how RARE a breakdown is. Higher = more patient before
+//                    one can trigger; negative pushes the trigger window
+//                    below E_START, so a chance exists from bar one.
+//   dropBars      - how LONG a breakdown runs once triggered: the researched
+//                    TYPICAL length for that genre. The actual length for
+//                    any one breakdown is drawn once, at trigger, from
+//                    75%-125% of this - centered on "typical," not an
+//                    open-ended coin-flip (see dropPhraseTarget below for
+//                    why that was the wrong shape).
+//   songMinutes / sectionSeconds - real-time targets for song-turnover
+//                    cadence and structural section length, converted to
+//                    bar counts against whatever BPM you actually run (see
+//                    SECTION/SONG_DROPS below).
+//   snareNudgeMs / hatNudgeMs - per-voice micro-timing (ms, converted to a
+//                    fraction of a bar - see applyNudge()/nudgeSec() above
+//                    voicePattern below). snareNudgeMs nudges the clap voice
+//                    (the always-in-kit backbeat/one-drop hit) uniformly;
+//                    hatNudgeMs is [oddStepMs, evenStepMs] for the hat voice.
+//                    Every mode now has a real, researched verdict, not a
+//                    placeholder - two earned a genuine nonzero nudge
+//                    (house, minimal), four have real evidence FOR staying
+//                    at 0 (techno, trance, psy, dubtechno - documented as
+//                    genuinely tightly-quantized-on-purpose genres, not
+//                    unresearched), and custom is intentionally the neutral
+//                    override-friendly default, not a genre to research. See
+//                    each preset's own comment below for full sourcing.
+// Override any single field per set without switching modes:
+// MODE_OVERRIDES = { dropPatience: N, songMinutes: N, ... }
+const MODE_PRESETS = {
+  // kickDropsOut:true (techno audit, corrected from false) - the false
+  // value borrowed dubtechno's "less about the drop, more about the
+  // drift" reasoning by analogy, never independently checked for techno.
+  // Real techno-specific evidence says the opposite: "the main breakdown
+  // where the kick AND bass are often removed completely, leaving space
+  // for atmospheric pads and the main melodic theme" - standard kick+bass-
+  // together breakdown, not a drift-not-drop exception. See KICK_DROPS_OUT
+  // below for the fuller note.
+  // snareNudgeMs:0/hatNudgeMs:[0,0] is not an unresearched gap - real
+  // evidence frames techno's mechanical, tightly-quantized hi-hat/
+  // percussion timing as a deliberate genre aesthetic, not a missing human
+  // touch to add. Kept at the true no-op on purpose.
+  // hatOpenPattern:'offbeat' (techno audit, corrected from null) - null
+  // was the same generic 75%-per-song-coinflip fallback that dubtechno's
+  // open hat got fixed away from in v12, never applied back to techno
+  // itself. Real techno-specific evidence: "hi-hats are characteristically
+  // repetitive, placed (traditionally open) on the offbeats to sit between
+  // the kick drum hits on all four beats of the bar" - a steady structural
+  // element, not an occasional accent. Switched to the same deterministic
+  // HAT_OPEN_PATTERNS entry house/trance/dubtechno already use.
+  // hatDrift:0.50/hatGhost:0.50, kitDriftScale:0.50/kitGhostScale:0.50
+  // (techno audit) - no dedicated per-voice citation for these, but "no
+  // data" isn't "leave the default" - an educated guess grounded in this
+  // mode's own already-stated design intent: kept "very mechanical" on
+  // purpose (see kickGhost/kickHuman above). That intent doesn't stop at
+  // the kick - applied consistently to the rest of the kit's pattern
+  // variation too. Landed between the unconstrained 1.00 default and
+  // dubtechno's 0.20: techno's "mechanical" reads as tight/precise, not
+  // dubtechno's static/hypnotic, so a real reduction, not as extreme a
+  // one. kitVelLo/kitVelHi left untouched - that's dynamic-level
+  // variation, not timing precision, and the one citation found ("don't
+  // set all your hi-hat notes to the same velocity") argues to keep it,
+  // not flatten it further.
+  // hatHuman:false (v32) - user's own direct request: hat velocity
+  // "mechanical but not always the same," same idea as the kick's
+  // kickHuman/velMap treatment (v15). See HAT_HUMAN_PRESET/HAT_VEL_MAP's
+  // own comment for why the indexing scheme had to be adapted rather than
+  // reused as-is - kick's hit count per bar is fixed, hat's isn't.
+  // kickVelLo:0.89/kickVelHi:1.00 (v33, was the shared 0.85/1.00) - user's
+  // own call, narrower/higher-floor than dubtechno/psy/trance's range.
+  // Breaks the "same SEED = identical kick map" property across techno vs.
+  // those three specifically (confirmed and liked a few versions back) -
+  // intended consequence of giving techno its own range, not a bug.
+  // bassChoices:'techno' (v34) - see BASS_CHOICES_TECHNO's own comment
+  // above for the full sourcing. Split off from the shared 'default' set
+  // (house/trance/custom, unaudited) rather than editing it - real
+  // evidence for techno bass specifically: "around 70% root... mostly
+  // root and fifth, with the minor third or flat seventh for tension."
+  // bassClip:1 (full-length) checked too and left alone - the "shortening"
+  // that matters for a rolling bassline happens via downstream sidechain
+  // ("the sidechain... ducks the bass on the kick hit... the downbeat
+  // notes get cut short by the sidechain anyway"), not the MIDI note
+  // itself, the opposite conclusion from dubtechno's bassClip fix but for
+  // a real, distinct, genre-specific reason.
+  // stabChordTones:[0,2,4] (plain triad, unchanged) confirmed correct on
+  // check, not just left by default: "a great starting point is a minor
+  // 7th chord... often heard in dub techno, house and lo-fi music" -
+  // techno pointedly isn't in that list, the same citation dubtechno's own
+  // minor-7th stab already rests on. stabClip:0.60 (v35, was the shared
+  // 0.90 "just under the full span") - every source on chord stabs, genre-
+  // agnostic, frames it as short/percussive/staccato, "unlike sustained
+  // pads" - 0.90 read as close to the opposite. Landed short of
+  // dubtechno's 0.40 on purpose: techno's aesthetic is more present/
+  // driving than dub techno's atmospheric/spacious one, a reasoned middle
+  // ground, not a hard number. stabRest/stabDrift checked too, left at the
+  // shared defaults - no citation either way, and "very mechanical"
+  // doesn't obviously extend from drum timing to how much a chord
+  // progression varies over time.
+  // padOn:true / stabInclude:0.5 / padInclude:0.5 (v36) - techno spans
+  // everything from melodic techno (chord stabs, lead melodies) to raw/
+  // minimal techno (harmonic content sparse, used sparingly, often a
+  // drone - "a single sustained note run through reverb and a slow
+  // filter" - standing in for the stab). Rather than pick one flavor or
+  // fork a second mode, each song independently rolls whether it gets the
+  // stab, the drone (pad - already the right mechanism, no new voice
+  // needed), neither, or both together (not alternating - that mechanism
+  // doesn't exist in this fork on purpose, see leadTrade's removal note).
+  // See STAB_INCLUDE_PRESET/PAD_INCLUDE_PRESET's own comment for the full
+  // reasoning.
+  // motifInclude:0.5 / harmonyMinCount:2 (v38, replaces v37's
+  // motifRequiresHarmony - a real correction, not a tweak). v37 only
+  // guaranteed "motif never appears alone" by tying it to stab/pad, but
+  // still allowed "just stab alone" or "just pad alone" - equally thin,
+  // and dubtechno already owns the genuinely sparse end of this engine on
+  // purpose, not techno. User's own explicit spec: techno should always
+  // be motif+chords, drone+chords, or motif+drone - never just drums and
+  // bass, and never just one lonely melodic layer either. Motif now rolls
+  // independently (0.5) same as stab/pad instead of being unconditional;
+  // HARMONY_MIN_COUNT:2 (see kitFor()) tops up to at least two of
+  // {motif,stab,pad} whenever the independent rolls land on fewer,
+  // picking which ones to promote by its own seeded roll so real variety
+  // survives. Verified by simulation: ~87.5% of songs land on exactly one
+  // of the three named pairs (~29% each), ~12.5% get all three, and 0% of
+  // songs get zero or one - the floor is a hard guarantee, not a bias.
+  // keyMoveChance:0.05 (v39, was 0.10) - real evidence: "in most house and
+  // techno there is no key change/modulation - it's the DJ's job to do
+  // that." 0.10 was actually HIGHER than psy/dubtechno's already-cited
+  // 0.03, the opposite of what this evidence says. Not zeroed though - the
+  // same citation frames it as a real, valued device when it IS used
+  // ("a sudden key change... after an intense part can give a very 'wow'
+  // factor"), and this engine already only checks for one right after a
+  // breakdown resolves - exactly the "after an intense part" moment the
+  // citation describes. songMinutes:7.6 and sectionSeconds:59 checked too,
+  // left unchanged - songMinutes already independently confirmed both by
+  // citation ("most techno tracks are 6 to 8 minutes long") and by the
+  // avgBarsPerDrop simulation run when climbLo/climbHi were tuned;
+  // sectionSeconds has no exact citation but 32 bars is a standard,
+  // common structural unit across techno/house convention generally.
+  // scaleMode:'phrygian' (v40, was 'natural') - real, specific evidence:
+  // "Phrygian mode is the most 'techno-sounding' scale due to its flat
+  // 2nd degree... extensively used in techno for its darker, tougher
+  // edge." Broader evidence separately confirms minor generally is the
+  // right family ("melodic techno... use minor keys always," "dark techno
+  // leans on minor modes, phrygian-like color"), but this citation names
+  // the specific mode, not just "some minor" - new PHRYGIAN_SCALE (flat
+  // 2nd, otherwise identical to natural minor), same "specific mode gets
+  // its own named option" treatment 'harmonic' already has for psy.
+  // Side note, not acted on: this mode's key can still roll into MAJOR
+  // for a given song (a separate ~30% mode-flip chance in keyOriginFor,
+  // unrelated to SCALE_MODE) - the evidence above argues fairly strongly
+  // for minor-almost-always in techno, which is in tension with that, but
+  // that mechanism is shared/global, not mode-specific, and changing it
+  // is a bigger question than this pass was scoped to.
+  // swingPct:50 (v16, was 56 - never actually researched, just carried
+  // over) - real evidence: "customary to set quantizing straight at 16th
+  // with no swing... a perfectly quantized four-on-the-floor pattern is
+  // exactly right for techno." Straightened to match.
+  // dropPatience:25/dropBars:8 (v20 - dropBars was 6, dropPatience
+  // unchanged) - these were carried-over originals, never actually checked
+  // against research the way most other fields in this file have been.
+  // dropPatience:25 turns out to already be well-calibrated once checked:
+  // running this file's own avgBarsPerDrop() simulation gives ~123 bars
+  // between drops, landing right in the cited "breakdown typically lands
+  // 64, 96, or 128 bars in" range - confirmed, not just guessed correctly.
+  // dropBars was undershooting though: real evidence puts 8 bars as the
+  // floor for a breakdown to register at all ("eight bars is enough for
+  // the room to register a change... 16 to anticipate a peak, 32 to
+  // emotionally commit"), so 6 was too short to even land as one. Raised
+  // to 8, the cited floor - still reads as the smallest, most understated
+  // version of a real breakdown, consistent with this mode's own "less
+  // about the drop, more about the drift" character, not a full 16-32 bar
+  // arrangement breakdown.
+  //
+  // climbLo:0.70/climbHi:1.70 (techno audit, start) - was the untouched
+  // shared 0.50/2.00 default, same "original, never independently
+  // checked" category dropPatience/dropBars turned out to be in before
+  // v20. User's own creative call, not a research citation - narrower
+  // spread than the old range (1.0 vs 1.5) at close to the same average
+  // speed, so a steadier/less erratic climb rather than a faster or
+  // slower one. Checked against SONG_DROPS math before locking in: stays
+  // at 2 breakdowns across techno's whole 125-135 BPM range, actual song
+  // length 7.7-8.35min vs the 7.6 target - no rounding-cliff jump, no
+  // songMinutes correction needed this time. Marked "for now," may get
+  // revisited.
+  techno:  { kickPattern: '4x4', kickGhost: 0, kickHuman: false, hatDrift: 0.50, hatGhost: 0.50, kitDriftScale: 0.50, kitGhostScale: 0.50, climbLo: 0.70, climbHi: 1.70, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0.30, hatHuman: false, kickVelLo: 0.89, kickVelHi: 1.00, stabInclude: 0.5, padInclude: 0.5, motifInclude: 0.5, harmonyMinCount: 2, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'phrygian',  hatRoll: 0, swingPct: 50, swingGrid: 8, bassPattern: 'roll16',     bassClip: 1,   sparse: 1,   motifCycle: 3, motifOn: true,  stabOn: true,  padOn: true, stabChordTones: [0,2,4], maxOptional: 2, hatOpenPattern: 'offbeat', keyMoveChance: 0.05, songMinutes: 7.6, padChordTones: [0,2,4], bassChoices: 'techno', optionalInclude: { snare: 0.35, ride: 0.3, lowtom: 0.4, midtom: 0.35, crash: 0.45, shaker: 0.45 }, sectionSeconds: 59, motifNoteRange: [3,7], kickDropsOut: true, dropPatience: 25, dropBars: 8, stabRest: 0.2, stabClip: 0.60, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [0,0] },
+  // snareNudgeMs:12/hatNudgeMs:[-4,10] - minimal-techno-specific evidence:
+  // offbeat hats/shakers pushed a hair behind the grid (5-15ms cited) and
+  // claps shifted late for a "slightly drunk," human feel are both
+  // documented minimal-techno conventions, distinct from techno's own
+  // deliberate rigidity right above. Values sit mid-range of the cited
+  // windows, not a hard single citation.
+  // kickGhost:0.05 (v17, was the unstudied shared 0.25) / kickHuman stays
+  // true - two different findings, not one: real evidence explicitly says
+  // "don't move your kicks off the quarter note grid" (arguing the kick's
+  // POSITION should be locked, i.e. near-zero ghost), while separately
+  // "groove comes from micro-timing, swing, and subtle velocity
+  // differences" (arguing kick VELOCITY should stay humanized, unlike
+  // techno/dubtechno's flattened kick). 0.05 was a reasoned "very little,
+  // not zero" call at the time, not a hard citation on the exact number.
+  //
+  // kickGhost:0.12 (v53, was 0.05) / kickVelLo:0.70 (v53, was the shared
+  // 0.85) - user's scoping call, informed by fresh genre research: this
+  // mode targets oldschool Robert Hood-lineage minimal techno + minimal
+  // house/microhouse specifically, not the diluted later usage of
+  // "minimal" as a catch-all for any 4/4 track at 128-130 BPM. Real
+  // evidence: Robert Hood's own stated intent was "a desire to return to
+  // a more human touch in electronic music, in reaction to the early '90s
+  // rave scene" - a direct, genre-founding statement for real, audible
+  // groove, unlike every other "no-human" mode's flattened kick. Minimal
+  // is explicitly NOT trying to be mechanical like techno/dubtechno/psy/
+  // trance - it wants groove. 0.12 raises ghost hits to something real
+  // and audible (was barely distinguishable from 0 at 0.05) while staying
+  // short of the untouched shared 0.25 - Hood's own "spaces between the
+  // notes elevated to the same importance as the notes themselves"
+  // argues restraint still matters, just not near-zero restraint.
+  // kickVelLo:0.70 doubles the velocity spread (was 0.15, now 0.30) for
+  // genuinely dynamic humanization rather than a narrow range that reads
+  // as humanized in name only - no exact citation for this specific
+  // number, a reasoned call off the "more human touch" intent.
+  //
+  // swingPct:55 (v54, was 52) - real evidence gives swing a concrete,
+  // labeled reference scale: "50 is straight, 54 is a light bounce, 58 is
+  // a heavy shuffle, 66 would be a perfect triplet feel, though nobody
+  // programs at 66, too mechanical." 52 sat barely above straight, closer
+  // to "no swing" than "light bounce" - too subtle to read as the real
+  // groove this mode's scope decision calls for. 55 lands solidly in
+  // "light bounce" without reaching "heavy shuffle." Deliberately left
+  // room below house's own swing (not yet audited) - house is meant to
+  // read as more bouncy/shuffled than minimal, so minimal's number needs
+  // headroom under whatever house lands on, not to match or exceed it.
+  //
+  // hatRoll:1 (v55, was 0 - the accented "e"/"a" pattern techno/dubtechno
+  // use). Real evidence names continuous rolling 16ths as a key minimal
+  // feature: "a key feature of minimal is lots of 1/16th notes on
+  // hi-hats," "hi-hats in Minimal Tech House are often closed and
+  // mechanical... hypnotic and repetitive" - that's HAT_ROLLING's shape
+  // (near-even 16ths), not the accented on/off pattern minimal had.
+  //
+  // rimInclude:0.20 (v56, was the shared 0.90) - user's "cage" call,
+  // grounded in a real, specific citation: "you're typically not dealing
+  // with more than four elements at any point... some of the most iconic
+  // minimal techno tracks use only 3-4 sounds," and Hood's own named trio
+  // is explicitly "kicks, hi-hats, and claps" - not kick+hat+clap+rim.
+  // rimInclude:0.90 alone (independent of clap) meant this mode's "core"
+  // averaged ~3.85 present before a single optional voice was even
+  // considered - rim wasn't earning a near-permanent 4th slot on any
+  // citation. Lowered to a rare accent instead, matching dubtechno's own
+  // register more than the untouched shared default. Trying this in
+  // isolation first (rest of the kit-size cage - maxOptional/
+  // optionalInclude - deliberately left alone this pass) since rim and
+  // the optional pool roll fully independently (a real, flagged
+  // architectural gap: nothing currently stops both from landing in the
+  // same song, so "never more than 4" isn't a hard guarantee yet, just a
+  // much rarer case at this odds). User's explicit call: leave it - "5
+  // elements sometimes is fine," the cage doesn't need to be airtight.
+  //
+  // maxOptional:1 (v58, was 3) - keeps the "usually 3-4, occasionally 5"
+  // shape the cage is going for: core is usually kick+hat+clap (~3),
+  // occasionally +rim (~4), and with maxOptional:1 occasionally +one more
+  // on top (~5) - matches the tolerance above exactly. optionalInclude
+  // rebalanced (was snare:0.15/ride:0.15/lowtom:0.1/midtom:0.1/crash:0.2/
+  // shaker:0.65) - user's explicit numbers: snare:0.3, shaker:0.5, all
+  // others 0.05. Old weights let shaker dominate the single optional slot
+  // almost every song - technically a roll, but not real variety in
+  // practice. New weights keep shaker/snare as the two likely candidates
+  // (funk/conga-lineage citation still favors shaker) while giving every
+  // voice a genuine, if rare, chance - the actual goal here was variation
+  // in which drum shows up, not just a stricter headcount.
+  //
+  // kitDriftScale/kitGhostScale left at the shared 1.00/1.00, confirmed
+  // as a real decision, not an unaudited gap - every mode that got these
+  // tightened (techno/psy/dubtechno) did so because its citations argued
+  // for mechanical precision. Minimal's own citation trail (Hood's "human
+  // touch," funk/soul lineage) argues the opposite: full, unconstrained
+  // pattern drift/ghost IS what "real groove, real variation" means for
+  // this mode, not something to fix.
+  //
+  // Bass (v61) - a real, deliberate split from the drum kit's own
+  // reasoning above, not a contradiction: the kit wants groove/variation,
+  // but bass wants to stay a tight, repetitive, hypnotic loop underneath
+  // it - a common real production pattern (locked anchor + groovy drums
+  // on top). bassPattern:'offbeat' was confirmed correct on citation:
+  // "basslines in minimal tend to be carried by the kicks... rather than
+  // having separate synth elements in the low frequencies" - offbeat's
+  // sparse, kick-avoiding placement was the closest fit ("bass fills the
+  // gaps the kick leaves"). Changed to 'syncopated' in v62 anyway - user's
+  // explicit design call for more rhythmic variety across this engine's
+  // bass voice as a whole (it was otherwise a straight binary switch
+  // across all 8 modes, offbeat vs roll16, nothing else), not a citation
+  // overturning the v61 finding. See BASS_PATTERNS' own comment above for
+  // the full reasoning on why this is documented as a deliberate creative
+  // choice rather than research. bassChoices:'drone'
+  // confirmed correct: "the bassline... loops with very little
+  // variation," "octave jumps... can add dynamic interest" - drone's
+  // existing weights (90% root, 8% octave, 2% fifth) already match this
+  // almost exactly. bassClip:0.6 -> 0.40 - real evidence names the note
+  // envelope itself as the defining trait, not something sidechain
+  // handles downstream (unlike techno's own bassClip conclusion): "short
+  // decay times and zero sustain... creates the characteristic minimal
+  // sound where gaps between sounds become prominent." Landed in
+  // dubtechno's own "short/percussive" register. bassDrift:0.45 -> 0.20 -
+  // "you find that pocket and you just make it a repetitive loop,"
+  // "loops with very little variation" - argues for a tight, barely-
+  // wandering bassline, the opposite of the shared default's open-ended
+  // drift. Matches dubtechno's own "static, hypnotic loop" register.
+  //
+  // No rhythmic variation exists for WHICH pattern shape plays, by
+  // design (still true after the v62 switch below): bassPattern is a
+  // static per-mode choice (like scaleMode or hatOpenPattern), not
+  // something that varies within a mode or rolls per song - every
+  // minimal song uses 'syncopated', full stop, same as every other mode
+  // is locked to its own one shape. A real per-song ROLL between shapes
+  // (mirroring bassChoices' own weighted-pitch mechanism) was discussed
+  // and would need a shared-engine change - not built, this is still a
+  // straight swap of the one fixed shape, not new capability. The only
+  // sources of rhythmic variety within whichever shape a mode has are
+  // bassDrift (how much the skeleton's exact hit positions wander
+  // bar-to-bar from their initial roll - just tightened above) and the
+  // voice's own rest chance (occasional whole-bar drop-outs, unrelated
+  // to drift). Bass also has
+  // ghost:0 unconditionally (see VOICES below) - no extra hits beyond
+  // the skeleton for any mode, not just minimal.
+  minimal: { kickPattern: '4x4', kickGhost: 0.12, kickHuman: true, hatDrift: 1.00, hatGhost: 1.00, kitDriftScale: 1.00, kitGhostScale: 1.00, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: true, kickVelLo: 0.70, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 1, swingPct: 55, swingGrid: 8, bassPattern: 'syncopated', bassClip: 0.40, sparse: 1.6, motifCycle: 2, motifOn: false, stabOn: false, padOn: false, stabChordTones: [0,2,4], maxOptional: 1, hatOpenPattern: null, keyMoveChance: 0.05, songMinutes: 8.1, padChordTones: [0,2,4], bassChoices: 'drone', optionalInclude: { snare: 0.3, ride: 0.05, lowtom: 0.05, midtom: 0.05, crash: 0.05, shaker: 0.5 }, sectionSeconds: 63, motifNoteRange: [3,7], kickDropsOut: false, dropPatience: 25, dropBars: 6, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.20, stabDrift: 0.20, rimInclude: 0.20, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 12, hatNudgeMs: [-4,10] },
+  // padOn reuses PAD_OCTAVE/PAD_CLIP from trance - those are global
+  // constants, not mode-specific, since psy's motif is just as continuously
+  // present as trance's and has the same masking risk to avoid.
+  // snareNudgeMs:0/hatNudgeMs:[0,0] - no citable psytrance-specific
+  // microtiming convention was found despite a real search; kept at the
+  // no-op default on purpose, consistent with the genre's reputation for
+  // tightly interlocked, precisely programmed rolling basslines (the
+  // groove comes from note choice and kick/bass interlock, not swing).
+  //
+  // bassPattern:'roll16' confirmed correct (v49): "a rapid sequence of
+  // notes (typically 16th notes at 140+ BPM) that creates a continuous,
+  // propulsive energy... the bass drives relentlessly forward" - exactly
+  // roll16's shape. bassClip:0.85 (v49, was 0.4 - the dev file's own prior
+  // comment on that number admitted it was "never actually checked, just
+  // carried over shared with techno/trance/custom," a reasoned estimate
+  // off a vague citation). Real, specific evidence for this exact rhythmic
+  // mechanism: "the whole note - attack through release - needs to
+  // complete inside a 16th. At 145 BPM that means fully silent by ~90ms
+  // after trigger... even 10ms of silence between notes is what gives the
+  // pattern its rolling feel instead of a legato slur." At 145 BPM a 16th
+  // step is ~103ms, so "silent by 90ms" means the note should occupy
+  // ~85-87% of the step, the opposite of 0.4's "short plucky" register -
+  // the old top-of-file mode summary calling psy's bass "short plucky" was
+  // itself part of the uncited assumption, not independent confirmation of
+  // it. bassChoices:'psy' (was 'drone') - see BASS_CHOICES_PSY above for
+  // full reasoning; same "drone's missing minor-3rd" gap dubtechno's own
+  // split already fixed (v24), now fixed for psy's real citation too.
+  //
+  // hatDrift/hatGhost/kitDriftScale/kitGhostScale: 0.20 (v51, were the
+  // unconstrained shared 1.00) - user's own design call, not a hard
+  // citation on the exact number, but grounded in real evidence already
+  // on file for this mode: "tightly interlocked, precisely programmed
+  // rolling basslines" (the same citation snareNudgeMs:0/hatNudgeMs:[0,0]
+  // already rest on) plus the newer "very distinctive bass beat that
+  // pounds constantly" / dense layering citation. Landed at dubtechno's
+  // "very little, tight" register (0.20) rather than techno/trance's
+  // middle-ground 0.50 - psy's own kit is already this file's busiest
+  // (maxOptional:3, high optionalInclude odds, hatRoll:1's continuous
+  // rolling hats), so more pattern variation isn't needed on top of an
+  // already-full kit. (hatOpenPattern was 'dense' when this was written -
+  // moved to 'offbeat' in v52, see that entry below; doesn't change the
+  // "already busy" conclusion, hatRoll:1 alone still carries it.)
+  // hatOpenPattern:'offbeat' (v52, was 'dense' - never actually cited, just
+  // a descriptive comment on the pattern definition itself). Real evidence
+  // for a trance-family hi-hat pattern: "xxO_xxO_xxO_xxO_" (closed, closed,
+  // open, rest, repeating every 4 steps) maps exactly onto 'offbeat's own
+  // [2,6,10,14], not 'dense's busier alternating pairs. Psy-specific
+  // citation backs the same shape indirectly: "driving closed hi-hats...
+  // fundamental to the groove" names CLOSED hats as the core element (
+  // already covered by hatRoll:1's rolling 16ths), not a busy open-hat
+  // layer on top. hatHuman:false (was true) - same "already busy, doesn't
+  // need more variation" logic as the kit-wide drift/ghost tightening
+  // (v51), applied to hat velocity specifically: techno's own
+  // mechanical/seed-generated HAT_VEL_MAP treatment fits psy's "tightly
+  // interlocked, precisely programmed" character better than humanized
+  // accent+jitter. No hat-specific citation as direct as techno's own
+  // request behind this one - a reasoned judgment call, not a sourced fix.
+  psy:     { kickPattern: '4x4', kickGhost: 0, kickHuman: false, hatDrift: 0.20, hatGhost: 0.20, kitDriftScale: 0.20, kitGhostScale: 0.20, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: false, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: false,     clapPattern: 'backbeat', scaleMode: 'harmonic', hatRoll: 1, swingPct: 50, swingGrid: 8, bassPattern: 'roll16',     bassClip: 0.85, sparse: 0.6, motifCycle: 2, motifOn: true,  stabOn: false, padOn: true, stabChordTones: [0,2,4], maxOptional: 3, hatOpenPattern: 'offbeat', keyMoveChance: 0.03, songMinutes: 9.0, padChordTones: [0,2,4], bassChoices: 'psy', optionalInclude: { snare: 0.5, ride: 0.35, lowtom: 0.0, midtom: 0.0, crash: 0.25, shaker: 0.7 }, sectionSeconds: 54, motifNoteRange: [6,10], kickDropsOut: true, dropPatience: 10, dropBars: 16, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [0,0] },
+  // House's audit started at v63, kick first per the standing order.
+  // kickGhost nonzero confirmed correct, real named technique, not
+  // filler: "additional 'ghost' kicks with lower velocity can be added
+  // to help fill out the groove," "extra kicks... velocity brought down
+  // to 25-35%." Structural bonus, no code change needed: "tech house...
+  // adds a pickup kick on step 15... gives forward propulsion" already
+  // matches this engine's existing PICKUP_BIAS/PICKUP_ELSE/PICKUP_VEL
+  // mechanism (favors any step before a real skeleton hit, step 15
+  // included for kick's 4x4 skeleton). kickHuman:true confirmed via
+  // general humanization evidence. Exact kickGhost:0.25 rate and
+  // kickVelLo/kickVelHi remain unverified-but-plausible, same "no data"
+  // category as several other shared defaults. hatRoll:1 confirmed:
+  // "closed hi-hat adding shuffle... on the 8th and 16th divisions."
+  // hatOpenPattern:'offbeat' -> 'lift' (v63) - see HAT_OPEN_PATTERNS'
+  // own comment above for the full reasoning.
+  //
+  // bassChoices stays 'default' (broader root/3rd/5th movement), not
+  // 'drone' like minimal - house basslines want more motion than minimal's
+  // tight one-octave root-fifth-only character.
+  // snareNudgeMs:8/hatNudgeMs:[-2,5] - real house convention: snare/clap
+  // nudged 5-10ms late for a laid-back pocket, hats given light swing/
+  // velocity variation on top of swingPct's own 54%. Kept modest since
+  // swingPct is already doing most of the work here; this is the added
+  // human touch on top of it, not a duplicate of it.
+  //
+  // stabChordTones:[0,2,4,6] (v65, was [0,2,4]) - already-cited fix, no
+  // new research needed: techno's own v35 finding said "a great starting
+  // point is a minor 7th chord... often heard in dub techno, house and
+  // lo-fi music" - techno pointedly wasn't in that list (why it correctly
+  // kept the plain triad), but house explicitly IS, same as dubtechno's
+  // own [0,2,4,6]. House was quietly sharing techno's un-recommended
+  // case. keyMoveChance:0.05 (v65, was 0.10) - same already-cited
+  // situation: techno's v39 finding said "in most house and techno there
+  // is no key change/modulation - it's the DJ's job to do that," house
+  // named directly, house just never got the matching update techno did.
+  //
+  // optionalInclude.shaker:0.80 (v66, was 0.55) - real evidence: "a
+  // shaker or percussion sample is typically added on every remaining
+  // 16th-note position" - frames shaker as a near-expected, continuous
+  // filler element in house, not just occasional texture. 0.55 read as
+  // closer to "sometimes" than "typically." Landed near psy's own 0.7
+  // (a similar "continuous shaker/perc texture" citation from earlier),
+  // slightly higher since this citation's language is a bit stronger
+  // ("typically added" vs. psy's more general framing). Rim/ride/toms/
+  // crash checked too - no citation found naming any of them
+  // individually for house, left unchanged.
+  //
+  // maxOptional:3 (v67, was 2) - same "cage" mechanism minimal's audit
+  // used, deliberately NOT copying minimal's own maxOptional:1 - house's
+  // citations (shaker "typically present," real snare/clap, no "3-4
+  // elements max" constraint anywhere in the sourcing) support a denser
+  // kit than minimal's Robert-Hood-lineage restraint. Landed at psy's own
+  // register (3) instead - house's percussion citations read closer to
+  // "busy, layered" than "sparse, minimal."
+  //
+  // bassPattern:'syncopated' (v68, was 'offbeat') - see BASS_PATTERNS'
+  // own comment above for the full reasoning. Real evidence: house bass
+  // wants off-beat notes at an asymmetric spacing ("and" of beats 1&3,
+  // 16th before beat 2), not offbeat's steady even 4-position pulse.
+  // bassClip:0.8/bassChoices:'default'/bassDrift:0.45 checked, left
+  // unchanged - note-length VARIETY (short fills vs. sustained root
+  // hits) and a true root-third-fifth WALK are both cited as real house
+  // techniques, but this engine has no mechanism for either (bassClip is
+  // one fixed value per mode; pitch choice has no memory of the previous
+  // note) - flagged as structural limitations, not something a value
+  // change can fix.
+  //
+  // Harmony/scale (v69) - checked, both confirmed reasonable, neither
+  // changed. scaleMode:'natural' - evidence genuinely split ("major
+  // results in uplifting, energetic progressions... minor offers a
+  // richer, introspective vibe" - house uses both), unlike techno's own
+  // phrygian finding which named one specific mode as THE defining
+  // choice. padOn:false - no citation found for or against a sustained
+  // pad in house specifically (unlike trance/psy's direct pad
+  // citations); stabOn:true already covers harmonic content. Side
+  // confirmation, no new action: house's own citation on 7th/9th/11th
+  // chord extensions independently reinforces stabChordTones:[0,2,4,6]
+  // (v65).
+  //
+  // Breakdown timing / song length (v69) - re-simulated via
+  // avgBarsPerDrop(), all confirmed correct, no changes: dropBars:12
+  // matches cited "typically 8-16 bars" (middle of the range).
+  // dropPatience:8/climbLo:0.50/climbHi:2.00 (still the untouched shared
+  // defaults) - SONG_DROPS stays at 2 across house's whole 120-125 BPM
+  // range, no rounding-cliff, matching cited "2-3 breakdowns."
+  // songMinutes:6.8 - actual simulated length 6.96-7.25min, landing
+  // right where cited ("4-6 minutes, if not longer... up to 8-10 for a
+  // progressive journey"). sectionSeconds:63 - ~31.5 bars at house's
+  // BPM, matching cited "larger changes every 32 or 64 bars" almost
+  // exactly. This closes house's mode audit.
+  house:   { kickPattern: '4x4', kickGhost: 0.25, kickHuman: true, hatDrift: 1.00, hatGhost: 1.00, kitDriftScale: 1.00, kitGhostScale: 1.00, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 1, swingPct: 54, swingGrid: 8, bassPattern: 'syncopated', bassClip: 0.8, sparse: 1,   motifCycle: 3, motifOn: true,  stabOn: true,  padOn: false, stabChordTones: [0,2,4,6], maxOptional: 3, hatOpenPattern: 'lift',    keyMoveChance: 0.05, songMinutes: 6.8, padChordTones: [0,2,4], bassChoices: 'default', optionalInclude: { snare: 0.3, ride: 0.45, lowtom: 0.25, midtom: 0.25, crash: 0.35, shaker: 0.80 }, sectionSeconds: 63, motifNoteRange: [3,7], kickDropsOut: true, dropPatience: 8, dropBars: 12, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 8, hatNudgeMs: [-2,5] },
+  // keyMoveChance:0.20 - opposite direction from psy on purpose: trance's
+  // key-lift-into-the-drop is a celebrated technique, not something to
+  // suppress. sectionSeconds:56 (32 bars) - same long-form structural tier
+  // as every other mode with this evidence (psy/techno/house/minimal/
+  // dubtechno); this one field got missed when the others were set.
+  // snareNudgeMs:0 - real evidence trance prioritizes tight, precise
+  // low-end impact over swing microtiming (documented alongside house/
+  // techno as a quantization-forward genre); no trance-specific citation
+  // was found to justify a nonzero snare/clap nudge specifically. hat's
+  // own nudge got a real citation later though - see hatNudgeMs's own
+  // note further down (v60), no longer [0,0].
+  // dropPatience:20/dropBars:16/climbLo:0.50/climbHi:2.00 (trance audit) -
+  // checked, all confirmed correct, no changes: dropBars:16 matches "the
+  // breakdown should be 16 bars" directly; songMinutes:6.9 matches "most
+  // trance tracks last 6-9 minutes"; dropPatience/climb verified via this
+  // file's own avgBarsPerDrop() simulation - SONG_DROPS stays at 2 across
+  // the whole 132-140 BPM range, actual length 6.67-7.07min, right on
+  // target. postDropBoost:0.35 (v42, was 0) - no citation exists for an
+  // exact number (this is an engine-internal abstraction, not something
+  // real production sources document), a reasoned/calibrated call like
+  // climbLo/dropBars, not a sourced one. Slightly above techno's 0.30:
+  // trance's drop is described as even more central than techno's ("a
+  // powerful main drop," the whole arc built around that payoff). The
+  // 32-bar decay window itself needs no change - already matches both
+  // techno's "keep the peak going for at least 32 bars" citation and
+  // trance's own "a thirty-two bar rise" buildup figure.
+  // hatRoll:1 (dense, continuous 16ths) confirmed correct: "in trance
+  // music, the hi-hat often plays a continuous stream of 16th notes,
+  // creating a shimmering effect" - same reasoning psy already rests on.
+  // hatNudgeMs:[-2,3] (v60, was [0,0]) - real evidence, and it names the
+  // exact mechanism this field already implements: "closed hats on a
+  // 16th note with every other hat pulled offbeat by a few milliseconds
+  // to add some groove" - hatNudgeMs IS [oddStepMs, evenStepMs], a
+  // different offset for alternating 16th steps, matching trance's own
+  // continuous-16th hat (hatRoll:1) directly, not by analogy. The old
+  // zero was "no citation found," not "citation says zero." Not in real
+  // tension with hatDrift/hatGhost's "precise rather than chaotic" (v43)
+  // - a fixed millisecond nudge is itself deterministic and repeatable,
+  // the opposite of chaos. No exact number was cited ("a few
+  // milliseconds"), so landed deliberately tighter than minimal's own
+  // [-4,10] (funk/soul-groove register) - trance still wants to read as
+  // more precise than that, not as loose.
+  // hatDrift:0.50/hatGhost:0.50 (v43, were the shared 1.00/1.00) - real
+  // evidence, not extrapolated design intent like techno's: "in trance,
+  // these elements [hi-hats, claps, rides, shakers, small percussion
+  // details] are often precise rather than chaotic." Landed at the same
+  // register as techno's own fix (0.50/0.50, "tight/precise") rather than
+  // dubtechno's 0.20 ("static/hypnotic") - different character, "precise"
+  // isn't "barely moving." Not a hard citation on the exact number, same
+  // honesty level as techno's version of this same fix.
+  // kitDriftScale:0.50/kitGhostScale:0.50 (v44, were the shared 1.00/1.00)
+  // - same "precise rather than chaotic" citation used for hatDrift/
+  // hatGhost above, since that source explicitly names "hi-hats, claps,
+  // rides, shakers, small percussion details" together, not hi-hats
+  // alone. Extends cleanly rather than being a separate invention.
+  // clap/rim/snare/ride/lowtom/midtom/shaker's general palette and
+  // relative emphasis ("driving kicks, crisp hi-hats, and impactful
+  // claps as the main percussion elements") checked too, but only
+  // qualitatively confirmed - no specific odds to check the existing
+  // optionalInclude numbers against, same wall hit for other modes'
+  // equivalent voices.
+  // scaleMode:'harmonic' (v45, was 'natural') - direct, specific evidence:
+  // "trance music uses the harmonic minor scale extensively... the
+  // augmented second between the b6 and natural 7 is the signature trance
+  // interval." Not "some minor" - the harmonic variant specifically,
+  // already an implemented option (psy uses it), just not pointed at
+  // trance before. Also cuts against the "uplifting trance = major key"
+  // assumption - real sourcing says minor (harmonic minor specifically)
+  // dominates, not major: "classic trance progression i-VI-III-VII...
+  // minor 7th and suspended chords... minor key progressions dominate."
+  // stabOn:true confirmed correct alongside this, not just left alone:
+  // "payoff may come from a lead melody, a chord stab, a bass pattern
+  // change, or a combination of all three" - a real, named trance device,
+  // not a mismatch. The genre's actual signature melodic device (a fast
+  // 16th-note arpeggio running through chord tones - "root, 3rd, 5th,
+  // octave, 5th, 3rd") has no equivalent voice in this engine at all -
+  // flagged, deliberately not built: user's call is that this belongs
+  // downstream as an Ableton arpeggiator effect, not a new MIDI voice
+  // here, same "sound design is downstream" boundary already established
+  // elsewhere in this file.
+  // stabInclude:0.80/motifInclude:0.80 (v46, were both 1.00, padInclude
+  // stays 1.00) - live-listening report ("stab and lead aren't always
+  // playing, but pad seems very present") is authoritative over the
+  // prior assumption that all three should be unconditional for this
+  // mode. Independent per-song rolls, no harmonyMinCount floor needed
+  // (unlike techno) - pad's own 1.00 already guarantees some harmony is
+  // always present, so stab/motif can just roll freely. High odds, not a
+  // random 50/50 like techno's, since the ask was "all three as default
+  // is basically fine" - keeps most songs full while giving the post-drop
+  // kitGuaranteeOnBoost mechanic (v41) something real to unlock: at
+  // 1.00/1.00/1.00 that mechanic was inert for trance (nothing was ever
+  // missing to guarantee). Verified by simulation: ~63% of songs get all
+  // three from the start, ~37% are missing at least one going into the
+  // drop - a real payoff moment, not just "same thing, louder."
+  // kitDropsOut:true (v47) - direct evidence, Wikipedia's trance article:
+  // "a soft breakdown disposing of beats and percussion entirely...
+  // leaving the melody or atmospherics to stand alone for an extended
+  // period before gradually building up again." Only kick/bass could drop
+  // out before this - hat/clap/rim/snare/ride/lowtom/midtom/shaker/stab
+  // had no dropsOut field at all, played straight through every
+  // breakdown regardless of mode. motif/pad already correctly survive
+  // (motif's code path never checks dropsOut; pad's is explicitly false)
+  // - matches "melody or atmospherics" without needing a change. Crash
+  // deliberately excluded, it's a rare structural marker already. This
+  // composes cleanly with the post-drop guarantees (v41/v29): breakdown
+  // strips everything but motif+pad bare, then the instant it ends,
+  // kitGuaranteeOnBoost/restGuaranteeOnBoost force it all back - the
+  // actual "soft breakdown into a big drop" arc, not a coincidence, since
+  // boost is only ever nonzero exactly when drop is false.
+  trance:  { kickPattern: '4x4', kickGhost: 0, kickHuman: false, hatDrift: 0.50, hatGhost: 0.50, kitDriftScale: 0.50, kitGhostScale: 0.50, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0.35, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 0.80, padInclude: 1.00, motifInclude: 0.80, harmonyMinCount: 0, kitDropsOut: true, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'harmonic', hatRoll: 1, swingPct: 50, swingGrid: 8, bassPattern: 'roll16',     bassClip: 0.85, sparse: 0.8, motifCycle: 4, motifOn: true,  stabOn: true,  padOn: true, stabChordTones: [0,2,4], maxOptional: 2, hatOpenPattern: 'offbeat', keyMoveChance: 0.20, songMinutes: 6.9, padChordTones: [0,4], bassChoices: 'default', optionalInclude: { snare: 0.55, ride: 0.3, lowtom: 0.3, midtom: 0.3, crash: 0.6, shaker: 0.3 }, sectionSeconds: 56, motifNoteRange: [4,8], kickDropsOut: true, dropPatience: 20, dropBars: 16, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [-2,3] },
+  // clapPattern:'none' - real, well-documented dub techno convention: sparse
+  // snare/clap hits "punctuate the silence" rather than run a backbeat -
+  // this engine's anti-silence safeguard (see CLAP_PATTERNS.none's own
+  // comment) already gives 'none' exactly that character by construction
+  // (one lonely recurring accent per song, never a steady pattern), not a
+  // missing feature. stabChordTones:[0,2,4,6] is a minor 7th (root-b3-5-b7,
+  // since SCALE_MODE is natural minor here) - directly confirmed as "a
+  // great starting point" for the genre's signature washed-out chord stab,
+  // not just a reasonable guess. maxOptional:1 + the lowest optionalInclude
+  // odds in the file is deliberate too - the tightest kit of any mode, the
+  // opposite call from minimal's denser percussion, matching the genre's
+  // own "just kick, hat, clap, one chord hit" minimalism. kickDropsOut:
+  // false - same reasoning as techno/minimal above: "less about the drop,
+  // more about the drift" is now directly confirmed too (real sources
+  // describe dub techno arrangement as long, incremental, atmosphere-first,
+  // explicitly "less emphasis on big drops, more on micro movement").
+  //
+  // snareNudgeMs:0/hatNudgeMs:[0,0] - CORRECTED from v9, which had this at
+  // the heaviest nudge of any mode by wrongly reasoning from Jamaican dub's
+  // (reggae one-drop) King Tubby-sourced laid-back pocket - a real but
+  // DIFFERENT genre that only shares a name. Dub techno-specific research
+  // says the opposite directly: "one of the hallmarks of dub techno is
+  // groove and movement resulting from DELAY instead of heavily swung drum
+  // parts," and its drums are explicitly "more quantized compared to other
+  // genres." That delay-driven groove is genuinely, correctly out of scope
+  // for a MIDI note generator (same category as trap's 808 slide or dub's
+  // own echo/reverb in the Bass Engine sibling project) - not a limitation
+  // to apologize for, just a real division of labor: a real dub techno
+  // producer also programs a tight, correctly-placed seed hit and lets a
+  // delay pedal/plugin generate the actual groove downstream, which is
+  // exactly what this preset's job is scoped to. swingPct:50 (v16, was 52)
+  // for the same reason, now taken all the way to straight rather than just
+  // near-straight - this genre's "shuffle" isn't a timing-grid property at
+  // all, and techno's own now-confirmed straight-quantizing evidence (see
+  // techno's own preset comment above) applies here too.
+  //
+  // kickGhost:0 / hatOpenPattern:'offbeat' (v12) - see KICK_GHOST_PRESET and
+  // HAT_OPEN_PATTERN's own comments below for the full sourcing. Short
+  // version: the kick's occasional off-grid ghost hit and the open hat's
+  // sometimes-there probabilistic accent were both engine-wide defaults
+  // dubtechno inherited unexamined: "the kick stays constant" argues for a
+  // hard zero on kick ghosting (the same "real evidence for zero" category
+  // as this mode's nudge fields above), while "the off-beat hat" is
+  // consistently described as the genre's actual structural groove element,
+  // not an occasional accent, arguing for the same deterministic pattern
+  // house/trance already use instead of the generic coin-flip fallback.
+  //
+  // songMinutes:10.0 (v19, was 12.0 at v14, originally 28.9) - a user
+  // set-length call throughout, not a genre-research value. 28.9 made the
+  // song-turnover cadence far longer in real time than every other mode's
+  // 6-9 minutes; 12.0 fixed that on request, but v18's dropPatience:35/
+  // dropBars:4 change (rarer, shorter breakdowns) shifted the real average
+  // gap between drops enough that SONG_DROPS (an integer - whole
+  // breakdowns only) rounds up to 3 instead of 2, actually landing the
+  // real song length at ~13-14 minutes, not 12 - confirmed by running the
+  // engine's own avgBarsPerDrop() simulation directly. Preference was to
+  // err short rather than long, so retargeted to 10.0, which reliably
+  // rounds SONG_DROPS to 2 across this mode's whole 115-125 BPM range
+  // (~8.8-9.6 actual minutes, comfortable margin either side of the
+  // 2-vs-3 rounding edge).
+  //
+  // keyMoveChance:0.03 (v21) - checked, left unchanged, now confirmed
+  // rather than assumed: real evidence is direct that "the genre
+  // emphasizes static harmonic elements... rather than using key changes
+  // or complex harmonic movement, dub techno relies on a single chord."
+  // Already tied with psy for the lowest value in the file, which matches.
+  // Worth noting it's not a hard zero, and shouldn't be - "even subtle
+  // modulation can stop repetitive chord stabs from sounding static" is
+  // the same citation, arguing for rare-but-nonzero, exactly what 0.03
+  // already is.
+  //
+  // sectionSeconds:64 (v21) - checked, left unchanged: no dedicated
+  // citation found, and the one plausible-sounding source doesn't actually
+  // apply - "dub techno typically features 4-8 MINUTE sections" describes
+  // a much larger DJ-mixing-block concept than this 64-SECOND internal
+  // pacing knob (crash-marker cadence, profile-drift pacing, motif regen
+  // cadence). That larger concept is already covered by songMinutes/
+  // dropPatience/dropBars above, not this field. Sits consistent with the
+  // shared tier every other techno-family mode already uses (54-64s) -
+  // an honest "no evidence found, kept consistent with peers," not a
+  // silent guess dressed up as researched.
+  //
+  // hatDrift:0.20 / hatGhost:0.20 (v22) - see HAT_DRIFT_PRESET/
+  // HAT_GHOST_PRESET's own comment below for the full sourcing. Short
+  // version: hi-hat pattern variation itself should be minimal (real
+  // evidence), but not suppressed to nothing - the rest of this mode's kit
+  // is already this file's sparsest (maxOptional:1, lowest optionalInclude
+  // odds, rimInclude:0.15), so a still-present but reduced amount of hat
+  // drift/ghost fits the kit's existing character rather than flattening
+  // it further on top of everything already stripped back.
+  //
+  // bassClip:0.40 (v24, was 1 - never actually checked, just carried over
+  // shared with techno/trance/custom) - real evidence: "bass notes
+  // function as part of the rhythm of the track rather than long
+  // modulated sounds, with short rounded sine waves," "short release
+  // times... total control over note lengths." 1 (full-length) was the
+  // opposite of that - the longest bass note of any mode here. 0.40
+  // anchors to the same "short/percussive" register already used for
+  // stabClip (0.40) and PLUCK_CLIP (0.35), a reasoned estimate off the
+  // citation, not a hard number.
+  //
+  // bassChoices:'dubtechno' (v24, was 'drone') - see BASS_CHOICES_DUBTECHNO
+  // above for the full reasoning. Short version: 'drone' (shared with
+  // minimal/psy/downtempo) never offers the minor 3rd real evidence names
+  // as one of dub techno's two candidate non-root notes ("root, octave,
+  // and 1 chord/scale note (such as a minor 3rd or a 5th)") - only the
+  // 5th. Split into its own set rather than editing the shared one, since
+  // 'drone's other three users haven't been audited yet.
+  //
+  // dropPatience:35 / dropBars:4 (v18, were 25/6 - identical to techno's own
+  // values, never actually differentiated). Real evidence: dub techno
+  // sections run 4-8 MINUTES long, built on "subtle automation and layering
+  // within extended loops" rather than dramatic breakdowns, explicitly the
+  // opposite of techno's more conventional build/breakdown arc. Rarer
+  // (higher dropPatience) and shorter (lower dropBars) than techno's when
+  // it does trigger - a reasoned estimate off that citation, not a hard
+  // number itself.
+  dubtechno: { kickPattern: '4x4', kickGhost: 0, kickHuman: false, hatDrift: 0.20, hatGhost: 0.20, kitDriftScale: 0.20, kitGhostScale: 0.20, climbLo: 0.45, climbHi: 1.80, kitVelLo: 0.55, kitVelHi: 0.75, postDropBoost: 0, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'none',     scaleMode: 'natural',  hatRoll: 0, swingPct: 50, swingGrid: 8, bassPattern: 'offbeat',    bassClip: 0.40,   sparse: 1.8, motifCycle: 2, motifOn: false, stabOn: true,  padOn: false, stabChordTones: [0,2,4,6], maxOptional: 1, hatOpenPattern: 'offbeat', keyMoveChance: 0.03, songMinutes: 10.0, padChordTones: [0,2,4], bassChoices: 'dubtechno', optionalInclude: { snare: 0.1, ride: 0.15, lowtom: 0.15, midtom: 0.1, crash: 0.15, shaker: 0.2 }, sectionSeconds: 64, motifNoteRange: [3,7], kickDropsOut: false, dropPatience: 35, dropBars: 4, stabRest: 0.07, stabClip: 0.40, bassDrift: 0.20, stabDrift: 0.10, rimInclude: 0.15, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [0,0] },
+  // your own scratchpad - MODE = 'custom' uses this untouched
+  custom:  { kickPattern: '4x4', kickGhost: 0.25, kickHuman: true, hatDrift: 1.00, hatGhost: 1.00, kitDriftScale: 1.00, kitGhostScale: 1.00, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,     clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 0, swingPct: 56, swingGrid: 8, bassPattern: 'roll16',     bassClip: 1,   sparse: 1,   motifCycle: 3, motifOn: true,  stabOn: true,  padOn: false, stabChordTones: [0,2,4], maxOptional: 2, hatOpenPattern: null, keyMoveChance: 0.10, songMinutes: 26.0, padChordTones: [0,2,4], bassChoices: 'default', optionalInclude: { snare: 0.35, ride: 0.45, lowtom: 0.45, midtom: 0.4, crash: 0.5, shaker: 0.4 }, sectionSeconds: 32, motifNoteRange: [3,7], kickDropsOut: true, dropPatience: 15, dropBars: 6, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: false, pluckPattern: 'offsync', percOn: false, percPattern: 'threeFour', snareNudgeMs: 0, hatNudgeMs: [0,0] },
+  // Values below (kickPattern/clapPattern/bassPattern/hatOpenPattern/
+  // swingPct/swingGrid/pluckPattern/percPattern/bassClip/kickDropsOut) are
+  // taken literally off a production spec the user supplied for this genre
+  // (BPM, kit, exact 16-step hit grid, gate lengths, arrangement). No motif/
+  // stab/pad in that spec, so all three stay off - this mode is purely
+  // rhythmic/bass, an honest texture rather than a full genre emulation.
+  // swingGrid:16 (not the usual 8) matches the spec's own "16-grid swing"
+  // term directly - it's a real, already-supported preset value, just never
+  // used until now. hatRoll:1 + hatOpenPattern:'offbeat' reproduces the
+  // spec's closed-hat-on-every-16th / open-hat-on-2,6,10,14 table exactly.
+  // bassPattern:'offbeat' reproduces the spec's sub-bass row exactly too -
+  // that pattern already existed, unused by anything but house's bass
+  // rhythm choice, not its bass FEEL - c.f. below.
+  // pluckPattern/percPattern are two new pattern tables (PLUCK_PATTERNS,
+  // PERC_PATTERNS below) added specifically for this mode's mid-bass pluck
+  // row ([1,3,5,9,11,13]) and its 3-against-4 polyrhythm percussion row
+  // ([0,3,6,9,12,15]) - see the "-- pluck --" / "-- perc --" sections below.
+  // UPDATE (v3): the spec's per-instrument micro-timing is now literal too -
+  // snareNudgeMs:10 (mid of the spec's +5 to +15ms) and hatNudgeMs:[-3,6]
+  // (mid of the spec's odd -2 to -4ms / even +4 to +8ms) - see applyNudge()/
+  // nudgeSec() above voicePattern below for the mechanism. Kick stays
+  // dead-on-grid by construction (no nudge field on the kick voice at all).
+  // STILL NOT literal: the spec's fixed bar-scripted arrangement (silence
+  // until bar 16, add voices at 17/33/49, breakdown 49-64, drop at 65) - this
+  // engine's arrangement is a probabilistic energy walk (phrase()/kitFor()),
+  // not a scripted bar-by-bar timeline, and that's a genuinely different
+  // mechanism, not a missing preset field. swingPct:56 (mid of the spec's
+  // 54-58 range) and dropBars:16 (the spec's own breakdown length, Takt
+  // 49-64) approximate the FEEL of that arrangement; dropPatience:20 and
+  // songMinutes:7.0 are not from the spec at all (it gave no breakdown
+  // frequency or track-length target) - kept in line with peer genres
+  // (trance's dropPatience:20; house's songMinutes range) rather than
+  // invented from nothing. bassChoices:'drone' (near-root-only) is the same
+  // reasoning as minimal - the spec's sub-bass is a plain repeating offbeat
+  // root, not a moving bassline.
+  downtempo: { kickPattern: '4x4', kickGhost: 0.25, kickHuman: true, hatDrift: 1.00, hatGhost: 1.00, kitDriftScale: 1.00, kitGhostScale: 1.00, climbLo: 0.50, climbHi: 2.00, kitVelLo: 0.75, kitVelHi: 0.95, postDropBoost: 0, hatHuman: true, kickVelLo: 0.85, kickVelHi: 1.00, stabInclude: 1.00, padInclude: 1.00, motifInclude: 1.00, harmonyMinCount: 0, kitDropsOut: false, bassDropsOut: true,   clapPattern: 'backbeat', scaleMode: 'natural',  hatRoll: 1, swingPct: 56, swingGrid: 16, bassPattern: 'offbeat',    bassClip: 0.65, sparse: 1.2, motifCycle: 2, motifOn: false, stabOn: false, padOn: false, stabChordTones: [0,2,4], maxOptional: 2, hatOpenPattern: 'offbeat', keyMoveChance: 0.10, songMinutes: 7.0, padChordTones: [0,2,4], bassChoices: 'drone', optionalInclude: { snare: 0.15, ride: 0.05, lowtom: 0.1, midtom: 0.1, crash: 0.15, shaker: 0.65 }, sectionSeconds: 38, motifNoteRange: [3,7], kickDropsOut: true, dropPatience: 20, dropBars: 16, stabRest: 0.2, stabClip: 0.90, bassDrift: 0.45, stabDrift: 0.20, rimInclude: 0.90, pluckOn: true, pluckPattern: 'offsync', percOn: true, percPattern: 'threeFour', snareNudgeMs: 10, hatNudgeMs: [-3,6] },
+};
+
+const _preset = { ...(MODE_PRESETS[MODE] || MODE_PRESETS.techno), ...MODE_OVERRIDES };
+const KICK_PATTERN = _preset.kickPattern;   // see KICK_PATTERNS below for the full list
+const CLAP_PATTERN = _preset.clapPattern;   // see CLAP_PATTERNS below
+const SCALE_MODE   = _preset.scaleMode;     // 'natural', 'harmonic' (raised 7th, Goa flavor), or 'phrygian' (v40, flat 2nd, techno)
+const HAT_ROLL     = _preset.hatRoll;       // 0 = accented pattern, 1 = dense rolling 16ths
+const SWING_PCT    = _preset.swingPct;      // 50 = straight, 62 = heavy
+const SWING_GRID   = _preset.swingGrid;     // 8 = shuffles the ghosts, 4 = shuffles the hats
+const BASS_PATTERN = _preset.bassPattern;   // see BASS_PATTERNS below - a rhythmic shape, not a density dial
+const BASS_CHOICES_NAME = _preset.bassChoices; // 'default', 'drone', 'dubtechno' (v24), or 'techno' (v34) - see BASS_CHOICE_SETS below (resolved there, not here, since it's defined later)
+// false for minimal/dubtechno (their own research: "less about the drop,
+// more about the drift" - kick+bass both vanishing together is still
+// structurally a drop no matter how rare it's made; keeping the pulse
+// alive is what actually reads as drift instead). True everywhere else,
+// INCLUDING techno now (techno audit, corrected) - that reasoning was
+// originally dub-techno-specific research, borrowed into techno by
+// analogy and never independently checked. Real techno-specific evidence
+// says the opposite: "the main breakdown where the kick AND bass are
+// often removed completely" - kick+bass drop together, standard
+// breakdown structure, not techno's own "less about the drop" case at
+// all. minimal inherited the same borrowed reasoning and is equally
+// unverified - flagged for its own mode's turn, not fixed yet.
+const KICK_DROPS_OUT = _preset.kickDropsOut;
+// Per-mode odds for each optional percussion voice (snare/ride/lowtom/
+// midtom/crash/shaker) - 0 means that instrument never appears in this
+// mode at all, same "0 chance" mechanism kitFor() already used for the
+// global default, just per genre now instead of one shared number.
+const OPTIONAL_INCLUDE = _preset.optionalInclude;
+const BASS_CLIP    = _preset.bassClip;      // note length, shorter = more room for the kick
+const SPARSE       = _preset.sparse;        // how much voices sit out. 0 = nobody rests
+// MOTIF_CYCLE: the motif is 2 bars long but restates every MOTIF_CYCLE bars.
+// At 3 it does not divide into the 4-bar phrase or the 16-bar section, so the
+// hook lands in a different place each time and only comes home every 48
+// bars - the rest bar between statements is where the silence lives. 2 = no
+// phasing, a plain repeating loop (more hypnotic, less techno-phasing).
+const MOTIF_CYCLE  = _preset.motifCycle;
+const MOTIF_ON       = _preset.motifOn;       // does this genre want the arch-lead at all - see MODE_PRESETS above
+const STAB_ON        = _preset.stabOn;        // does this genre want chord stabs at all - see MODE_PRESETS above
+const STAB_CHORD_TONES = _preset.stabChordTones; // [0,2,4]=triad, [0,2,4,6]=adds the 7th - see "-- chord --" below
+const PAD_ON         = _preset.padOn;         // does this genre want the sustained pad at all - see MODE_PRESETS above
+const PAD_CHORD_TONES = _preset.padChordTones; // [0,2,4]=full triad, [0,4]=root+5th only - see "-- pad --" below
+// stabInclude/padInclude (v36) - separate from stabOn/padOn ("does this
+// genre have the feature at all"), this is "given the feature exists, how
+// often does a SONG actually roll it in." Real evidence: techno spans
+// everything from melodic techno (chord stabs, lead melodies) to raw/
+// minimal techno ("harmonic content is sparse... used sparingly," a drone
+// - "a single sustained note run through reverb and a slow filter" -
+// often standing in for the stab entirely). Rather than pick one flavor
+// for techno (or fork into a second mode), each song independently rolls
+// whether it gets the stab, the drone (pad - already the right mechanism,
+// fires once per bar with a long sustain, no new voice needed), neither,
+// or both together - not alternating within a song, that would be new
+// mechanism this fork deliberately doesn't have (see leadTrade's removal
+// note elsewhere in this file). techno: 0.5/0.5, independent rolls, so
+// roughly a quarter of songs each get neither/stab-only/drone-only/both.
+// Every other mode keeps 1.00/1.00 explicitly - unchanged, always-on
+// exactly like before this field existed.
+const STAB_INCLUDE_PRESET = _preset.stabInclude;
+const PAD_INCLUDE_PRESET = _preset.padInclude;
+// MOTIF_INCLUDE_PRESET (v38, replaces v37's motifRequiresHarmony) - motif
+// now rolls independently per song just like stab/pad, instead of being
+// unconditionally on. HARMONY_MIN_COUNT (below) is what actually
+// guarantees "never just drums and bass" - see its own comment at
+// kitFor(). techno: 0.5 (same register as stabInclude/padInclude, no
+// citation for the exact number); every other mode 1.00 explicitly
+// (unchanged - motif stays unconditional everywhere else).
+const MOTIF_INCLUDE_PRESET = _preset.motifInclude;
+const HARMONY_VOICE_NAMES = ['motif', 'stab', 'pad'];
+const HARMONY_MIN_COUNT = _preset.harmonyMinCount;
+// KIT_DROPS_OUT_PRESET (v47) - real evidence, trance specifically: "a soft
+// breakdown disposing of beats and percussion entirely... leaving the
+// melody or atmospherics to stand alone." Only kick/bass could drop out
+// before this - hat/clap/rim/snare/ride/lowtom/midtom/shaker/stab had no
+// dropsOut field at all, so they played straight through every
+// breakdown in every mode. False (unchanged) everywhere except trance -
+// motif/pad already correctly survive breakdowns (motif's own code path
+// never checks dropsOut at all; pad's is explicitly false), matching
+// "melody or atmospherics" without needing a change. Crash deliberately
+// excluded - it's a rare structural marker already, not a regular groove
+// element, "drops out during breakdown" doesn't apply to it the same way.
+const KIT_DROPS_OUT_PRESET = _preset.kitDropsOut;
+// bassDropsOut (v50) - bass's dropsOut was hardcoded true (VOICES below),
+// no per-mode override existed at all, unlike kick/the rest of the kit.
+// True (unchanged) everywhere except psy - direct citation: "the song
+// will break down and start a new rhythmic pattern over the constant
+// bass line... a very distinctive bass beat that pounds constantly
+// throughout the song." Psy's whole arc is described as layers/rhythm
+// cycling over a bassline that never stops, not one more voice that
+// drops - the opposite of techno/trance's own confirmed "kick and bass
+// both drop" breakdowns.
+const BASS_DROPS_OUT_PRESET = _preset.bassDropsOut;
+const MAX_OPTIONAL   = _preset.maxOptional;   // kit size on top of the core - see MODE_PRESETS above (was a top-level dial, now mode-driven)
+const DROP_PATIENCE  = _preset.dropPatience;  // breakdown character (frequent/dramatic vs. rare/gradual) - see dropPatience note above MODE_PRESETS (was a top-level dial, now mode-driven)
+// breakdown DURATION (how long once triggered), as opposed to dropPatience
+// above (how often). Re-rolled every phrase while inside a breakdown - see
+// the quick-reference block above MODE_PRESETS for the expected-length math.
+const DROP_BARS      = _preset.dropBars;
+// stab's own section-rest chance (restsAt), separate from the generic 0.20
+// every other stab-using mode gets. dubtechno's chord stab is that genre's
+// signature sound (see the "-- chord --" section below), not a peripheral
+// texture layer like it is elsewhere - it shouldn't inherit the same
+// SPARSE-driven rest treatment as a percussion voice. 0.07 keeps its
+// restChance (0.07*SPARSE) low even at dubtechno's own high SPARSE:1.8.
+const STAB_REST = _preset.stabRest;
+// bassDrift/stabDrift/rimInclude/stabClip (v11) - genuinely new per-mode
+// dials, not a retune of existing ones. Until now `drift` (how far a
+// voice's skeleton wanders from its original roll) and `rim`'s per-song
+// kit-membership odds were single global constants in VOICES below, shared
+// identically by every mode - there was no way for a genre to ask for a
+// MORE hypnotic/static pattern than another, only for more REST (via
+// SPARSE). dubtechno surfaced this as a real gap, not a dial-tuning one:
+// real dub techno research describes it as building over long phrases with
+// only slow, incremental change to the same loop - a stronger claim than
+// SPARSE's "sits out more" alone can express, and its "just kick, hat,
+// clap, one chord hit" minimalism has no real room for a ~90%-likely rim
+// layer with no per-genre off switch (unlike clap, which has
+// clapPattern:'none'). Every other mode gets these fields set to the exact
+// value the engine already hardcoded (bassDrift:0.45, stabDrift:0.20,
+// rimInclude:0.90) - provably unchanged behavior, not a silent retune -
+// dubtechno alone gets researched lower values. See BASS_VOICE/STAB
+// voice/rim voice below for where these are actually read.
+const BASS_DRIFT_PRESET = _preset.bassDrift;
+const STAB_DRIFT_PRESET = _preset.stabDrift;
+const RIM_INCLUDE = _preset.rimInclude;
+// hatDrift/hatGhost (v22) - the hat voice's drift/ghost were single
+// hardcoded 1.00/1.00 constants in VOICES, identical for every mode, the
+// same shape as v11's bassDrift/stabDrift gap and v12's kickGhost gap.
+// Real evidence, found specifically for dub techno's hi-hat: "hi-hat
+// patterns themselves may be simple and repetitive with minimal variation
+// in the drum programming itself, producers compensate for this by using
+// extensive effects processing" - the same "movement comes from delay/
+// reverb downstream, not from this engine's own pattern variation"
+// division of labor already established for the kick and the chord stab.
+// Not a hard zero though - "minimal variation" is weaker language than
+// kick's "stays constant," and a second source explicitly confirms real
+// closed hats still exist as a genuine element ("tight closed hats"), not
+// something to suppress to nothing. Every other mode keeps 1.00/1.00
+// explicitly; dubtechno gets 0.20/0.20, the same "more static than the
+// techno-tuned default" register already used for bassDrift/stabDrift.
+const HAT_DRIFT_PRESET = _preset.hatDrift;
+const HAT_GHOST_PRESET = _preset.hatGhost;
+// kitDriftScale/kitGhostScale (v23) - generalizes v22's hat finding into a
+// standing rule instead of one more one-off per-voice field. clap/rim/
+// snare/ride/lowtom/midtom/shaker still shared hardcoded drift/ghost
+// constants across every mode, the same never-checked-per-genre shape kick
+// and hat both had before their own fixes - but hand-tuning six more
+// individual per-voice dials would pretend a level of per-instrument
+// research evidence that doesn't exist; the actual citation ("hi-hat
+// patterns... minimal variation... movement from delay, not this engine's
+// own pattern variation") was never instrument-specific in the first
+// place, it's a claim about dub techno's drum programming as a whole. So
+// instead of new per-voice fields, these seven voices' EXISTING drift/
+// ghost values are multiplied by one shared per-mode scale - every mode's
+// scale is 1.00 (provably unchanged behavior, same verification discipline
+// as v11), dubtechno's is 0.20, the same ratio v22 already used for hat.
+// Each voice keeps its own distinct character (rim still drifts more than
+// snare, ride still ghosts more than lowtom) - only relatively "tightened,"
+// not flattened to one identical number.
+const KIT_DRIFT_SCALE = _preset.kitDriftScale;
+const KIT_GHOST_SCALE = _preset.kitGhostScale;
+// kitVelLo/kitVelHi (v26) - clap/rim/snare had no custom `vel` field at
+// all, so they fell through to the global SKEL_VEL_LO/HI default
+// (0.75-0.95) same as every other unspecial voice, in every mode. Real
+// evidence, from the second AI-table cross-check: dub techno's snare/
+// clap/rim should sit at "low-to-moderate velocity, often with
+// intentional velocity drops or occasional single ghost notes," not
+// "max/front-facing." User's own direction: some random variation wanted,
+// seed-reproducible, but lighter than house or other genres - not flat,
+// not heavy. The existing per-hit rnd() draw is already fully
+// seed-based/reproducible; what was missing was a genre-appropriate
+// range to draw from, not a different mechanism. Every other mode keeps
+// 0.75/0.95 explicitly (byte-identical to the old fallback behavior);
+// dubtechno gets 0.55/0.75 - same 0.20 spread (real variation preserved),
+// shifted quieter.
+const KIT_VEL_LO_PRESET = _preset.kitVelLo;
+const KIT_VEL_HI_PRESET = _preset.kitVelHi;
+// KICK_GHOST_PRESET (v12) - same "shared constant, not actually researched
+// per-mode" shape as the v11 fields above, found by going back through the
+// engine voice-by-voice with dubtechno as the test case. kick's `ghost`
+// (chance of an extra quiet off-grid hit beyond the frozen 4x4 skeleton) was
+// a single hardcoded 0.25 in VOICES below, identical for every mode. Real
+// dub techno sources are direct on this exact point: "the kick stays
+// constant" and its drums are "explicitly more quantized compared to other
+// genres" (already the basis for this mode's zeroed nudges above) - there's
+// no room in that description for occasional off-grid kick hits, quiet or
+// not. Every other mode keeps the original 0.25 explicitly (unchanged
+// behavior) - dubtechno alone gets 0, the same "real evidence for a hard
+// zero, not an unresearched gap" category as its nudge fields.
+const KICK_GHOST_PRESET = _preset.kickGhost;
+// KICK_HUMAN_PRESET / KICK_VEL_MAP (v15) - your own research call: techno
+// and dubtechno both want zero humanization on the kick's velocity, not
+// just its pattern - no per-beat accent shape, no per-hit random jitter.
+// psy/trance get the same treatment (same "tight, mechanical, precisely
+// programmed" register). Instead of going fully flat (identical velocity
+// on every hit, which would read as lifeless/robotic rather than just
+// unswung), the kick gets ONE fixed 8-value velocity map, rolled once from
+// SEED at load and never touched again - not per-song, not per-bar, not
+// per-hit. It's the only thing that gives the kick any identity in these
+// four modes: different SEEDs produce a different fixed pattern, but a
+// given SEED's pattern never varies once picked. house/minimal/downtempo/
+// custom keep the original accent+jitter behavior unchanged (kickHuman:
+// true) - not decided yet, deliberately left alone.
+const KICK_HUMAN_PRESET = _preset.kickHuman;
+// KICK_VEL_LO/KICK_VEL_HI (v33) - was a single global 0.85/1.00 shared by
+// all four "no-human" modes, never checked whether techno wanted its own
+// spread. Now per-mode (kickVelLo/kickVelHi). User's own creative call:
+// techno gets 0.89/1.00 - a narrower, higher-floor range than the shared
+// 0.85/1.00, less dynamic spread reading as tighter/more consistent,
+// consistent with this mode's own "very mechanical" design intent.
+// dubtechno/psy/trance keep 0.85/1.00 explicitly. Side effect worth
+// naming: this breaks the "same SEED = identical kick map" property
+// across techno vs. the other three specifically, since the range itself
+// now differs - psy/trance/dubtechno still share it with each other under
+// a shared SEED, only techno diverges, and that's the intended
+// consequence of giving it its own range, not a bug.
+const KICK_VEL_LO = _preset.kickVelLo, KICK_VEL_HI = _preset.kickVelHi;
+const KICK_VEL_MAP = Array.from({ length: 8 }, (_, i) => KICK_VEL_LO + rnd(41, i, 0) * (KICK_VEL_HI - KICK_VEL_LO));
+// HAT_HUMAN_PRESET / HAT_VEL_MAP (v32) - same "mechanical but not always
+// the same" idea as KICK_VEL_MAP above, adapted rather than reused
+// directly: kick's map is indexed by HIT ORDER (1st/2nd/3rd/4th hit in the
+// bar), which only works because kick's hit count per bar is fixed and
+// guaranteed (exactly 4, always, since v13). Hat has no such guarantee -
+// its real/ghost hits can land on any of the 16 steps, varying bar to
+// bar - so hit-order indexing doesn't generalize here. Indexed by ABSOLUTE
+// STEP POSITION instead (bar*STEPS+step, mod the map length), which works
+// regardless of which steps actually fire. A 6-value map against a
+// 16-step bar doesn't divide evenly, so it also naturally phases (the
+// same Reich-style drift rim's 3-step profile already does), rather than
+// looping identically. Every mode keeps `hatHuman: true` (unchanged
+// accent+jitter default) except techno.
+const HAT_HUMAN_PRESET = _preset.hatHuman;
+const HAT_VEL_LO = 0.75, HAT_VEL_HI = 0.95; // matches SKEL_VEL_LO/HI (defined later) - kept as its own literal pair here, not a forward reference to it
+const HAT_VEL_MAP = Array.from({ length: 6 }, (_, i) => HAT_VEL_LO + rnd(42, i, 0) * (HAT_VEL_HI - HAT_VEL_LO));
+// STAB_CLIP (v11) - was a single global 0.90 ("just under the full span")
+// shared by every stab-using mode. Real dub techno research is explicit
+// that its signature chord is a SHORT rhythmic stab, unlike a sustained
+// pad - the apparent length/wash comes from a downstream delay tail this
+// engine doesn't (and structurally can't) generate, so the note THIS
+// engine places needs to actually read as a short seed hit, not a
+// near-full-step pad-like sustain, or the "let delay create the tail"
+// division of labor this project settled on doesn't actually hold. Every
+// other mode keeps the original 0.90 explicitly (their own stab aesthetic
+// is closer to a held chord and wasn't researched to want something
+// shorter) - dubtechno gets 0.40, closer to this file's own established
+// "short/percussive" register (see PLUCK_CLIP's 0.35 for the precedent),
+// a reasoned estimate, not a hard citation.
+const STAB_CLIP = _preset.stabClip;
+// HAT_OPEN_PATTERN (dubtechno's value corrected in v12): every source on
+// programming a dub techno beat describes the open hat itself as the genre's
+// actual off-beat groove element ("the first step... the four-to-the-floor
+// kick and the off-beat hat", loaded as an open-hat sample) - a steady,
+// reliably-present element, not an occasional accent. dubtechno had
+// hatOpenPattern:null (the same generic probabilistic fallback techno gets:
+// a 75%-per-song coin flip on whether the open hat exists at all, and even
+// then mostly firing on one step out of the four). That undersells a
+// documented structural element to a sometimes-there accent. Switched to
+// 'offbeat', the same deterministic HAT_OPEN_PATTERNS entry house/trance
+// already use - it was the right existing mechanism, just not pointed at
+// dubtechno.
+const HAT_OPEN_PATTERN = _preset.hatOpenPattern; // null = old probabilistic accent behavior, or a HAT_OPEN_PATTERNS name for a deterministic groove (techno/house/trance/psy/downtempo/dubtechno)
+const PLUCK_ON       = _preset.pluckOn;       // does this genre want the mid-register pluck voice at all - downtempo only so far, see "-- pluck --" below
+const PLUCK_PATTERN  = _preset.pluckPattern;  // see PLUCK_PATTERNS below
+const PERC_ON        = _preset.percOn;        // does this genre want the dedicated polyrhythm-perc voice at all - downtempo only so far, see "-- perc --" below
+const PERC_PATTERN   = _preset.percPattern;   // see PERC_PATTERNS below
+// Micro-timing (snareNudgeMs/hatNudgeMs in MODE_PRESETS) - see the
+// applyNudge()/nudgeSec() comment above voicePattern below for the full
+// mechanism and why most modes keep these at 0/[0,0] (no evidence for a
+// genre-specific nudge beyond what swingPct/skeleton-position already do).
+const SNARE_NUDGE_MS = _preset.snareNudgeMs;
+const HAT_NUDGE_MS   = _preset.hatNudgeMs;
+
+// -- new song -------------------------------------------------
+// After this many breakdowns the set turns over: energy resets, every voice
+// gets a new pattern, the kit is re-rolled and the key jumps. 0 = never.
+// SONG_DROPS and SECTION are both computed further down (right after the
+// phrase()/drop-walk constants they depend on) - see the "real-time
+// arrangement pacing" block below E_MAX/CLIMB_LO/RELEASE_LO. Both are
+// derived from a real-time target (songMinutes, sectionSeconds in
+// MODE_PRESETS) against whatever BPM you're actually running, not a flat
+// bar count - see SECS_PER_BAR below for why that distinction matters.
+
+// -- motif (channel 5) ----------------------------------------
+// A 2-bar phrase with an arch shape and one climax, repeated verbatim then
+// with its ending altered. On/off is per MODE now (motifOn in
+// MODE_PRESETS) - MOTIF_ON above is derived from that, not a separate
+// switch. Octave/clip stay global for now.
+// MOTIF_OCTAVE:72 (v70, was 60 - same as STAB_OCTAVE, a real collision an
+// external review caught, not just a theoretical risk). Both anchors sat
+// at the identical base octave despite this comment's own prior claim
+// that motif "sits well above the chords so they never collide" - it
+// didn't; measured 6% of motif notes landing on the same step as a
+// chord tone across 2000 bars, 3% in exact unison. Melodic-techno sourcing
+// puts the lead an octave-plus above the chords - raised a full octave
+// (60->72) to actually deliver the separation this file already claimed.
+const MOTIF_OCTAVE = 72;
+const MOTIF_CLIP   = 0.85;
+
+// -- chord ----------------------------------------------------
+// On/off is per MODE (stabOn). Chord voicing (stabChordTones in
+// MODE_PRESETS -> STAB_CHORD_TONES below) is per mode too: [0,2,4] is a
+// plain root-3rd-5th triad, the default everywhere. dubtechno gets
+// [0,2,4,6] instead - degree 6 is the 7th, and since its SCALE_MODE is
+// natural minor, root-b3-5-b7 is exactly a minor 7 chord.
+const STAB_OCTAVE = 60; // lower = darker. Keep above 59 or it fights the bass.
+// STAB_CLIP is now per-mode - see its own comment above MODE_PRESETS'
+// consumption block (near STAB_REST) for the full reasoning.
+
+// -- pad (channel 6) ---------------------------------------------
+// A sustained chord bed behind the lead, not a chop - long attack/release
+// rather than a percussive hit. Reuses the chordTones machinery from stab
+// rather than a new gate model (one re-attack per bar reads as
+// "held chord that follows the changes" closely enough). On/off per MODE
+// (padOn) - only trance/psy use it so far. padChordTones: trance is the
+// only mode running pad+stab continuously at once, so its pad drops to
+// root+5th ([0,4]) instead of the full triad - otherwise two harmonic
+// voices double the identical chord; stab still carries the full color.
+// PAD_CLIP is on a DIFFERENT SCALE than every other clip in this file:
+// everything else runs through .segment(STEPS) (16 slots/bar), so clip(1.0)
+// there means "one full 16th-step." Pad fires ~once per bar, so its
+// available span is ~16 steps, not 1 - clip must scale against that, or
+// "almost a whole bar" ends up meaning "almost one beat" instead. 15
+// mirrors STAB_CLIP=0.90's "just under the full span" ratio, scaled up.
+// PAD_OCTAVE sits two octaves below MOTIF_OCTAVE now (was one, before
+// MOTIF_OCTAVE's own v70 fix raised it 60->72) - trance runs pad+motif
+// continuously at once, and pad rings almost the entire bar (unlike stab's
+// brief hits), so same octave there would mask the lead for most of it.
+// Even more separation than before is fine here, not a problem to fix.
+const PAD_OCTAVE = 48;
+const PAD_CLIP   = 15;
+
+// -- pluck (shares channel 3 with the chord stab) -----------------
+// downtempo's mid-bass/synth-pluck line - a second pitched voice below the
+// chord register, above BASS_OCTAVE. Reuses BASS_CHOICES_SET (same
+// root/3rd/5th note-choice logic as the sub-bass, one octave up) rather than
+// a new choice table - the spec gave a rhythm, not an independent harmonic
+// part. Shares stabChan with the chord stab - safe only because downtempo
+// runs pluckOn with stabOn off. dropsOut is false on purpose - the spec's
+// own breakdown (Takt 49-64) keeps the pluck running while kick/sub-bass
+// cut out.
+const PLUCK_OCTAVE = 48;
+const PLUCK_CLIP   = 0.35; // spec: 25-50% of a 1/16 for pluck/percussion note lengths - midpoint
+
+// -- perc (channel 1, with the rest of the drums) ------------------
+// downtempo's dedicated 3-against-4 polyrhythm layer (frame drum/woodblock/
+// bongo family in the spec) - GM 60/61 (Hi/Lo Bongo), the closest GM-mapped
+// match to that instrument family, same "strict GM" rule the rest of the
+// drum kit follows. A dedicated on/off voice like stab/pad, not one of the
+// optional/competing-for-a-slot percussion voices (snare/ride/lowtom/
+// midtom) - this pattern is a defining rhythmic element of the mode, not a
+// texture layer that should be able to lose its kit slot to a tom or ride.
+const PERC_NOTES = [60, 61];
+
+// ============================================================
+//  Below here is the engine. You should not need to touch it.
+// ============================================================
+
+const drumChan = 1, bassChan = 2, stabChan = 3, motifChan = 5, padChan = 6;
+const BASS_OCTAVE = 36;
+const BASS_OFFBEAT  = 0.85;
+const BASS_SIXTEENTH = 0.55;
+const BASS_CHOICES = [
+  { idx: 0, oct: 0, w: 0.76 },
+  { idx: 0, oct: 1, w: 0.10 },
+  { idx: 4, oct: 0, w: 0.08 },
+  { idx: 2, oct: 0, w: 0.06 },
+];
+// Near-drone: almost entirely root, rare octave jump, essentially no 3rd/5th
+// wander (psy, minimal, downtempo). Named separately rather than editing
+// BASS_CHOICES since most modes still want that gentle root/5th/3rd motion.
+const BASS_CHOICES_DRONE = [
+  { idx: 0, oct: 0, w: 0.90 },
+  { idx: 0, oct: 1, w: 0.08 },
+  { idx: 4, oct: 0, w: 0.02 },
+];
+// dubtechno-only (v24) - split off from BASS_CHOICES_DRONE rather than
+// editing it, since 'drone' is shared with minimal/psy/downtempo and this
+// project hasn't audited those three yet. Real evidence for dub techno
+// specifically names TWO candidate non-root notes, not one: "often a root,
+// octave, and 1 chord/scale note (such as a minor 3rd OR a 5th)" -
+// BASS_CHOICES_DRONE only ever offers the 5th (idx:4), never the 3rd
+// (idx:2). Same root-heavy shape as 'drone' otherwise, just with a small
+// weight moved off the octave/5th to give the 3rd a real, if rare, chance
+// - a reasoned split of the existing ratio, not a cited exact number.
+const BASS_CHOICES_DUBTECHNO = [
+  { idx: 0, oct: 0, w: 0.85 },
+  { idx: 0, oct: 1, w: 0.06 },
+  { idx: 2, oct: 0, w: 0.05 },
+  { idx: 4, oct: 0, w: 0.04 },
+];
+// techno-only (v34) - split off from 'default' rather than editing it,
+// since 'default' is shared with house/trance/custom and those haven't
+// been audited yet. Real evidence, specific to techno bass note choice:
+// "around 70% of the notes... should be the root... mostly root and
+// fifth, with the minor third or flat seventh for tension." 'default'
+// gives 76% root (close enough) but only 14% total to real harmonic
+// movement (5th+3rd combined, no flat 7th at all, even though the
+// citation names it explicitly alongside the minor 3rd). Rebuilt directly
+// off the citation's own language: 70% root, 5th emphasized over 3rd/b7
+// per "mostly root and fifth," minor 3rd and flat 7th (idx:6 - the 7th
+// scale degree, b7 in this mode's natural-minor SCALE_MODE) both present
+// as the named "tension" notes, rarer than the 5th.
+const BASS_CHOICES_TECHNO = [
+  { idx: 0, oct: 0, w: 0.70 },
+  { idx: 0, oct: 1, w: 0.08 },
+  { idx: 4, oct: 0, w: 0.12 },
+  { idx: 2, oct: 0, w: 0.06 },
+  { idx: 6, oct: 0, w: 0.04 },
+];
+// psy-only (v49) - split off from BASS_CHOICES_DRONE, same gap dubtechno's
+// own split (v24) already fixed: 'drone' never offers the minor 3rd at all.
+// Real evidence for psy bass specifically: "root swaps: hold the root for
+// 8 bars, move to the 5th or minor 3rd for 2 bars, come back" - names the
+// minor 3rd as a real candidate move, same shape as dubtechno's citation.
+// Kept root-dominant like 'drone' (psy's own bass character is still
+// near-drone/rolling, not chordally active) - just moved a small weight
+// off the octave/5th onto the 3rd so it's a real, if rare, possibility.
+const BASS_CHOICES_PSY = [
+  { idx: 0, oct: 0, w: 0.87 },
+  { idx: 0, oct: 1, w: 0.06 },
+  { idx: 4, oct: 0, w: 0.04 },
+  { idx: 2, oct: 0, w: 0.03 },
+];
+const BASS_CHOICE_SETS = { default: BASS_CHOICES, drone: BASS_CHOICES_DRONE, dubtechno: BASS_CHOICES_DUBTECHNO, techno: BASS_CHOICES_TECHNO, psy: BASS_CHOICES_PSY };
+const BASS_CHOICES_SET = BASS_CHOICE_SETS[BASS_CHOICES_NAME] || BASS_CHOICES;
+const E_START = 30;
+const SWING = (SWING_PCT - 50) / 50;
+
+const STEPS = 16;
+const BARS_PER_PHRASE = 4;
+
+const sig = (typeof signal !== 'undefined') ? signal : (f) => time.fmap(f);
+
+function rnd(kind, a, b) {
+  let h = (kind * 374761393 + a * 668265263 + b * 2246822519 + SEED * 3266489917) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = Math.imul(h ^ (h >>> 16), 2246822507);
+  h = h ^ (h >>> 15);
+  return (h >>> 0) / 4294967296;
+}
+
+// Every stateful walk in this file (phrase(), keyAtPhrase(), and the
+// per-voice profile/skeleton/rest chains inside voicePattern below) is the
+// same shape: a memoized array, grown lazily up to whatever index is asked
+// for, each new element computed from the array so far. Factored out once so
+// that growth/clamping logic - which is fiddly to get right (the +4096 guard
+// exists because Strudel can query arbitrarily far-future indices) - can't
+// drift between the five places that need it. `step(arr)` only ever reads
+// arr, never mutates it; it returns the next element to push.
+function growChain(arr, i, step) {
+  if (!(i >= 0)) i = 0;
+  i = Math.min(i, arr.length + 4096);
+  while (arr.length <= i) arr.push(step(arr));
+  return arr[i];
+}
+
+// The (step, bar) pair every per-16th-note signal callback derives from a
+// Strudel `t` the same way - pulled out so that derivation can't quietly
+// differ between the handful of sig() callbacks below that need it.
+const stepBar = t => [Math.floor(t * STEPS) % STEPS, Math.floor(t)];
+
+const E_MAX = 100;
+// CLIMB_LO/CLIMB_HI (v25) - per-phrase energy gain, now mode-driven
+// (climbLo/climbHi in MODE_PRESETS) instead of one shared 0.5/2.0 constant.
+// Real evidence for slowing this down specifically for dubtechno: the same
+// "long, incremental, subtle automation... not dramatic breakdowns"
+// citation already behind dropPatience/dropBars (v18) argues for a slower
+// climb too - the arrangement should take longer to feel "ready"
+// for anything to happen. Checked with this file's own avgBarsPerDrop()
+// simulation before picking numbers, since this system's interactions are
+// genuinely non-obvious: a longer DROP_COOLDOWN combined with a gentler
+// RELEASE was tried first and found to backfire (energy keeps climbing
+// unconditionally through cooldown, so a softer release only banks energy
+// for a faster re-trigger right after - the OPPOSITE of "rarer"). Climb
+// alone doesn't have that problem and was verified to keep this mode's
+// song-length target (songMinutes:10.0, v19) intact across its whole BPM
+// range instead of quietly regressing it back toward the "12 is too long"
+// ceiling already rejected once. Every other mode keeps 0.50/2.00
+// explicitly; dubtechno gets 0.45/1.80 - a real, checked change, not a
+// hard-cited exact number. DROP_COOLDOWN/RELEASE_LO/RELEASE_HI stay
+// global/shared for every mode - not because they don't matter, but
+// because no combination tried actually achieved "rarer" without either
+// backfiring or needing another round of songMinutes correction to
+// compensate.
+const CLIMB_LO = _preset.climbLo, CLIMB_HI = _preset.climbHi;
+const DROP_PATIENCE_SAFE = Math.max(-35, Math.min(45, DROP_PATIENCE));
+const DROP_LO = 40 + DROP_PATIENCE_SAFE;
+const DROP_HI = Math.max(DROP_LO + 5, Math.min(100, 90 + DROP_PATIENCE_SAFE));
+const DROP_MAX_CHANCE = 0.18;
+const DROP_COOLDOWN = 4;
+const RELEASE_LO = 0.3, RELEASE_HI = 0.6;
+
+// -- real-time arrangement pacing ------------------------------
+// SECS_PER_BAR converts every bar-based structural constant below into real
+// time at whatever BPM you're actually running.
+const SECS_PER_BAR = 240 / BPM;
+// SECTION: governs crash-marker cadence, profile-drift pacing, rest-section
+// length, motif regeneration cadence, in units of BARS_PER_PHRASE-bar
+// phrases. Derived from sectionSeconds (MODE_PRESETS), a real-time target.
+const SECTION = Math.max(1, Math.round(_preset.sectionSeconds / (SECS_PER_BAR * BARS_PER_PHRASE)));
+// A voice's section-level rest (restsAt, inside voicePattern below) has the
+// same "re-rolled forever" shape breakdown length used to have: an
+// independent coin-flip every SECTION, unbounded tail. It's capped there,
+// per-voice, proportional to that voice's OWN restChance (see the note at
+// restsAt) rather than one flat number - a voice deliberately set to rest
+// 75% of sections (the ceiling) needs more room to actually rest that often
+// than a voice at 20% does, or the cap ends up overriding the setting
+// instead of just bounding its tail. A flat cap tuned for the common case
+// was exactly this mistake: capped at 1 consecutive section, dubtechno's
+// voice (restChance 0.75, the ceiling - the sparsest, most "background"
+// setting in the file) was actually forced to REST only 43% of the time -
+// less than half - because the cap fired before its own high rest-chance
+// ever got to express itself. Reported as "talking constantly," correctly.
+// REST_CAP_MULT=0.75 puts the cap at 3 consecutive sections for a voice at
+// the 0.75 restChance ceiling (the sparsest any voice can be set to) -
+// generous enough that its "mostly resting" character actually reads as
+// that, tight enough that even the ceiling case can't run past a few
+// minutes of real silence.
+const REST_CAP_MULT = 0.75;
+// Breakdown length used to be dropExtend: a per-phrase "continue?" coin-flip
+// with no memory. That shape has two problems, not one: it's unbounded (a
+// long enough run of heads is always possible - dnb's old 0.875 produced a
+// real 216-bar, ~5min breakdown in one session, only "fixed" by capping the
+// tail after the fact), and its single most likely OUTCOME sits at the
+// SHORTEST possible length, not the average - a geometric distribution's
+// mode is at its minimum, not its mean. So even capped, it was never
+// actually producing "usually about the researched typical length" - it was
+// producing "usually short, occasionally much longer," averaging out to
+// match the target only because the tail dragged the mean up. Replaced
+// entirely: each breakdown's actual length is drawn ONCE, at the moment it
+// triggers, from 75%-125% of dropBars (the per-mode researched typical
+// length) - centered on typical by construction, and inherently bounded,
+// no cap needed because there's no open-ended process to cap in the first
+// place.
+function dropPhraseTarget(bars, roll) {
+  const phrases = Math.max(1, bars / BARS_PER_PHRASE);
+  return Math.max(1, Math.round(phrases * (0.75 + roll * 0.5)));
+}
+// Average real bars between drop-events for a given dropPatience/dropBars
+// pair - no simple closed form exists (the climb/ramp/cooldown walk is a
+// genuine random process), so this runs its own small, fixed-seed
+// simulation to estimate it. Uses a SEPARATE PRNG from the live rnd()/SEED
+// on purpose: this must come out the same every run regardless of what SEED
+// you're performing with, or changing SEED mid-set would also silently
+// change how many drops make up a song.
+function avgBarsPerDrop(patience, dropBars) {
+  const pSafe = Math.max(-35, Math.min(45, patience));
+  const pLo = 40 + pSafe, pHi = Math.max(pLo + 5, Math.min(100, 90 + pSafe));
+  let s = 0x9e3779b9;
+  const lcg = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  let e = E_START, cool = 0, drop = false, bar = 0, lastDropBar = -1, dropLen = 0, dropTarget = 0;
+  const gaps = [];
+  for (let n = 0; n < 5000; n++) {
+    e = Math.min(E_MAX, e + CLIMB_LO + lcg() * (CLIMB_HI - CLIMB_LO));
+    let nowDrop = false;
+    if (drop) {
+      nowDrop = dropLen <= dropTarget;
+      if (!nowDrop) cool = DROP_COOLDOWN;
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - pLo) / (pHi - pLo)));
+      if (lcg() < ramp * DROP_MAX_CHANCE) {
+        nowDrop = true;
+        dropTarget = dropPhraseTarget(dropBars, lcg());
+        e = e * (1 - (RELEASE_LO + lcg() * (RELEASE_HI - RELEASE_LO)));
+      }
+    }
+    if (nowDrop && !drop) {
+      if (lastDropBar >= 0) gaps.push(bar - lastDropBar);
+      lastDropBar = bar;
+    }
+    dropLen = nowDrop ? dropLen + 1 : 0;
+    drop = nowDrop;
+    bar += BARS_PER_PHRASE;
+  }
+  return gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : dropBars;
+}
+// SONG_DROPS: after this many breakdowns the set turns over (energy resets,
+// every voice gets a new pattern, kit re-rolled, key jumps). Used to be a
+// flat per-mode count (songDrops) calibrated against each genre's typical
+// BPM - now derived from songMinutes (MODE_PRESETS), a real-time "one
+// track's worth" target, divided by the actual current gap length at this
+// mode's own dropPatience/dropBars and this BPM. 0 = never (not used by
+// any mode currently, but MODE_OVERRIDES = { songMinutes: 0 } would do it).
+const SONG_DROPS = _preset.songMinutes > 0
+  ? Math.max(1, Math.round((_preset.songMinutes * 60) / (avgBarsPerDrop(DROP_PATIENCE, DROP_BARS) * SECS_PER_BAR)))
+  : 0;
+
+// POST_DROP_BOOST/POST_DROP_DECAY_STEP (v29) - "hits harder after the
+// drop," not just "busier": a temporary phantom-energy value that turns on
+// the instant a breakdown ends and fades back to 0 linearly over 8 phrases
+// (32 bars, BARS_PER_PHRASE-derived) - tied directly to the cited "keep
+// the peak section going for at least 32 bars... full drums, bass, the
+// hook... think of it as the chorus." It only feeds efrac() (ghost-hit
+// density and the ghost velocity range) and the bass rest-guarantee below
+// - it deliberately does NOT touch the drop-trigger probability itself
+// (DROP_LO/DROP_HI/ramp), so none of the dropPatience/climbLo timing math
+// already verified against real evidence needs re-checking. 0 for every
+// mode by default (the field, the decay math, and the boost logic all
+// become no-ops at 0 - not a special case, just multiplying by zero);
+// techno gets 0.3 as its first real user, since "the drop" is exactly the
+// kind of moment this mode's own citations describe as needing GENUINE
+// impact, not just a gradual return to baseline.
+const POST_DROP_BOOST = _preset.postDropBoost;
+const POST_DROP_DECAY_STEP = POST_DROP_BOOST / 8;
+
+const _walk = [{ e: E_START, drop: false, cool: 0, song: 0, since: 0, dropLen: 0, dropTarget: 0, boost: 0 }];
+function phrase(i) {
+  return growChain(_walk, i, arr => {
+    const n = arr.length, p = arr[n - 1];
+    let e = Math.min(E_MAX, p.e + CLIMB_LO + rnd(4, n, 0) * (CLIMB_HI - CLIMB_LO));
+    let drop = false, cool = p.cool, song = p.song, since = p.since, dropLen = 0, dropTarget = p.dropTarget;
+    if (p.drop) {
+      // already mid-breakdown - dropTarget (phrases) was fixed at trigger
+      dropLen = p.dropLen + 1;
+      drop = dropLen <= p.dropTarget;
+      if (!drop) cool = DROP_COOLDOWN; // just ended this phrase - cooldown starts now, not at trigger
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - DROP_LO) / (DROP_HI - DROP_LO)));
+      if (rnd(5, n, 0) < ramp * DROP_MAX_CHANCE) {
+        drop = true;
+        dropLen = 1;
+        dropTarget = dropPhraseTarget(DROP_BARS, rnd(6, n, 0));
+        e = e * (1 - (RELEASE_LO + rnd(7, n, 0) * (RELEASE_HI - RELEASE_LO)));
+        since += 1;
+        if (SONG_DROPS > 0 && since >= SONG_DROPS) { song += 1; since = 0; e = E_START; }
+      }
+    }
+    // boost: fresh POST_DROP_BOOST the instant a breakdown just ended
+    // (p.drop was true, drop is now false); 0 throughout an active
+    // breakdown; otherwise decays toward 0, never below it.
+    const boost = (p.drop && !drop) ? POST_DROP_BOOST
+      : drop ? 0
+      : Math.max(0, p.boost - POST_DROP_DECAY_STEP);
+    return { e, drop, cool, song, since, dropLen, dropTarget, boost };
+  });
+}
+const songAtBar = bar => phrase(Math.floor(bar / BARS_PER_PHRASE)).song;
+const efrac = st => Math.max(0, Math.min(1, (st.e - E_START) / (E_MAX - E_START) + (st.boost || 0)));
+
+
+// Per MODE (keyMoveChance in MODE_PRESETS) - a key move is only ever
+// considered right after a breakdown resolves (see keyAtPhrase below).
+const KEY_MOVE_CHANCE = _preset.keyMoveChance;
+const KEY_RELATIVE_ODDS = 0.25;
+const MAX_KEY_DRIFT = 2;
+
+const PITCH_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
+const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
+const HARMONIC_MINOR_SCALE = [0, 2, 3, 5, 7, 8, 11];
+// PHRYGIAN_SCALE (v40, techno) - natural minor with a flattened 2nd degree
+// (index 1: 2 -> 1). Real evidence, specific and direct: "Phrygian mode is
+// the most 'techno-sounding' scale due to its flat 2nd degree, which
+// creates a sense of threat and darkness... extensively used in techno
+// for its darker, tougher edge." Broader evidence confirms minor generally
+// is the right family for techno ("melodic techno... use minor keys
+// always," "dark techno leans on minor modes, phrygian-like color"), but
+// this citation goes further and names the specific mode, not just "some
+// minor" - the same distinction 'harmonic' already gets for psy's raised-
+// 7th "Goa flavor".
+const PHRYGIAN_SCALE = [0, 1, 3, 5, 7, 8, 10];
+
+function rootOf(num, mode) {
+  const base = (7 * (num - 1)) % 12;
+  return mode === 'm' ? (base + 9) % 12 : base;
+}
+function parseOpenKey(s) {
+  const m = String(s).trim().toLowerCase().match(/^(\d{1,2})([md])$/);
+  if (!m) return { num: 1, mode: 'm' };
+  return { num: Math.min(12, Math.max(1, +m[1])), mode: m[2] };
+}
+function keyName(k) {
+  return k.num + k.mode + ' (' + PITCH_NAMES[rootOf(k.num, k.mode)] + (k.mode === 'm' ? ' minor)' : ' major)');
+}
+function wheelDist(a, b) {
+  const d = Math.abs(a - b) % 12;
+  return Math.min(d, 12 - d);
+}
+
+const KEY_TYPED = parseOpenKey(OPEN_KEY);
+const NEW_SONG_KEY_DRIFT = 3;
+const _origins = {};
+function keyOriginFor(song) {
+  if (_origins[song]) return _origins[song];
+  if (song === 0) { _origins[0] = KEY_TYPED; return KEY_TYPED; }
+  const off = Math.floor(rnd(24, song, 0) * (NEW_SONG_KEY_DRIFT * 2 + 1)) - NEW_SONG_KEY_DRIFT;
+  const num = ((KEY_TYPED.num - 1 + off + 12) % 12) + 1;
+  const mode = rnd(25, song, 0) < 0.30 ? (KEY_TYPED.mode === 'm' ? 'd' : 'm') : KEY_TYPED.mode;
+  _origins[song] = { num, mode };
+  return _origins[song];
+}
+const KEY_ORIGIN = KEY_TYPED;
+const _keys = [KEY_TYPED];
+function keyAtPhrase(ph) {
+  return growChain(_keys, ph, arr => {
+    const n = arr.length, prev = arr[n - 1];
+    const home = keyOriginFor(phrase(n).song);
+    if (phrase(n).song !== phrase(n - 1).song) return home;
+    let next = prev;
+    if (n > 0 && !phrase(n).drop && phrase(n - 1).drop && rnd(18, n, 0) < KEY_MOVE_CHANCE) {
+      if (rnd(19, n, 0) < KEY_RELATIVE_ODDS) {
+        next = { num: prev.num, mode: prev.mode === 'm' ? 'd' : 'm' };
+      } else {
+        const dir = rnd(20, n, 0) < 0.5 ? -1 : 1;
+        const num = ((prev.num - 1 + dir + 12) % 12) + 1;
+        if (wheelDist(num, home.num) <= MAX_KEY_DRIFT) next = { num, mode: prev.mode };
+      }
+    }
+    return next;
+  });
+}
+function keyAtBar(bar) { return keyAtPhrase(Math.floor(bar / BARS_PER_PHRASE)); }
+function scaleAtBar(bar) {
+  const k = keyAtBar(bar);
+  const minorScale = SCALE_MODE === 'harmonic' ? HARMONIC_MINOR_SCALE
+    : SCALE_MODE === 'phrygian' ? PHRYGIAN_SCALE
+    : MINOR_SCALE;
+  return { root: rootOf(k.num, k.mode), steps: k.mode === 'm' ? minorScale : MAJOR_SCALE, key: k };
+}
+
+function logKeySchedule(phrases) {
+  // seconds/bar derived from the live BPM, not hardcoded - was fixed at
+  // 1.92 (i.e. baked-in 125 BPM), which silently drifted the printed
+  // minute-marks for any other BPM (e.g. ~39% off at DnB's 174).
+  const secsPerPhrase = BARS_PER_PHRASE * (240 / BPM);
+  const out = ['key ' + keyName(KEY_ORIGIN) + ' - schedule for the next ' +
+               (phrases * secsPerPhrase / 60).toFixed(0) + ' min:'];
+  let prev = null;
+  for (let p = 0; p < phrases; p++) {
+    const k = keyAtPhrase(p);
+    if (!prev || k.num !== prev.num || k.mode !== prev.mode) {
+      const mins = p * secsPerPhrase / 60;
+      out.push('  ' + mins.toFixed(1) + ' min  ' + keyName(k) +
+               (prev ? '  (' + wheelDist(k.num, KEY_ORIGIN.num) + ' fifths from home)' : '  START'));
+      prev = k;
+    }
+  }
+  if (out.length === 1) out.push('  no key changes in this window - as intended');
+  console.log(out.join('\n'));
+}
+// Prints your key schedule to the browser console. Delete this line if you
+// do not want it.
+logKeySchedule(500);
+
+// Breakdown length is bounded by construction now (drawn once from a fixed
+// range, not capped after the fact), and the rest-streak mechanism is
+// hard-capped - so both worst cases are plain formulas, not something you'd
+// need to simulate to check. This just prints them. If you add a NEW
+// probabilistic mechanism later that re-rolls the same chance repeatedly
+// with no memory (a coin-flip "keep going?" state machine, or an
+// independent per-period roll like restsAt), it has the same unbounded-tail
+// shape by construction, AND its most likely single outcome sits at the
+// shortest/least length, not the average - draw the actual value once from
+// a bounded range around the researched typical value instead, the same
+// fix applied here, rather than adding a cap on top of an open-ended roll.
+function logRiskCaps() {
+  const loPhrases = dropPhraseTarget(DROP_BARS, 0), hiPhrases = dropPhraseTarget(DROP_BARS, 1);
+  const loBars = loPhrases * BARS_PER_PHRASE, hiBars = hiPhrases * BARS_PER_PHRASE;
+  // rest-streak cap is per-voice now (proportional to that voice's own
+  // restChance) - this reports the worst case, i.e. a voice at the 0.75
+  // restChance ceiling (the most "background" any voice gets set to).
+  const worstRestStreak = Math.max(1, Math.ceil(REST_CAP_MULT / (1 - 0.75)));
+  const secsPerRestStreak = worstRestStreak * SECTION * BARS_PER_PHRASE * SECS_PER_BAR;
+  console.log('@ ' + MODE + ' ' + BPM + 'bpm: breakdown runs ' + loBars + '-' + hiBars +
+    ' bars (' + (loBars * SECS_PER_BAR / 60).toFixed(1) + '-' + (hiBars * SECS_PER_BAR / 60).toFixed(1) +
+    ' min, centered on the researched ' + DROP_BARS + ') - worst-case section-rest streak (a voice at the 0.75 ceiling) ' +
+    worstRestStreak + ' section' + (worstRestStreak === 1 ? '' : 's') +
+    ' (' + (secsPerRestStreak / 60).toFixed(1) + ' min max)');
+}
+logRiskCaps();
+
+const SKEL_VEL_LO = 0.75, SKEL_VEL_HI = 0.95;
+const MAX_GHOST = 0.35;
+const WANDER_LO = 0.15, WANDER_HI = 0.85;
+// Ghost-hit velocity, shared by every drum voice in every mode (v59, was
+// 0.30-0.40/0.50-0.65) - real evidence: "ghost notes can be added as very
+// quiet snare or percussion hits between main beats at 10-20% velocity."
+// The old floor (0.30) alone was already louder than the cited ceiling
+// (0.20). Doesn't contradict anything already established per-mode -
+// dubtechno's own citation already wanted "low-to-moderate... quiet ghost
+// notes," techno's HAT_VEL_MAP comment already frames ghosts as "fills,
+// not full hits" - a global drop only reinforces those. Low-energy songs
+// now land right in the cited 10-20% window; high-energy songs are
+// allowed to push a bit above it (up to 0.30) rather than being flatly
+// capped at 20% regardless of how much energy the song has built.
+const GVEL_LO_A = 0.12, GVEL_LO_B = 0.18;
+const GVEL_HI_A = 0.20, GVEL_HI_B = 0.30;
+
+const PHRASE_LIFT  = 1.35;
+const SECTION_LIFT = 1.80;
+const PICKUP_BIAS  = 1.70;
+const PICKUP_ELSE  = 0.72;
+const PICKUP_VEL   = 1.12;
+
+// ---- motif generator ----
+// Rules taken from melodic-techno practice and basic melodic theory:
+//   arch contour, exactly one climax placed past the midpoint and on a strong
+//   beat, first and last note are chord tones, mostly stepwise motion, and the
+//   whole thing stays inside the scale. Shape is decided FIRST, then filled in -
+//   generating note by note produced wobble rather than melody.
+const MOTIF_CHORD = [0, 2, 4];
+const MOTIF_POS = [0, 4, 6, 8, 12, 14, 16, 20, 22, 24, 28];
+const MOTIF_STRONG = [0, 8, 16, 24];
+// Per MODE (motifNoteRange in MODE_PRESETS, [lo,hi]) - how many notes the
+// 2-bar arch has.
+const MOTIF_N_LO = _preset.motifNoteRange[0], MOTIF_N_HI = _preset.motifNoteRange[1];
+
+function motifSpread(total, moves, id, salt) {
+  const out = new Array(moves).fill(1);
+  let extra = total - moves;
+  for (let k = 0; extra > 0 && k < 50; k++) {
+    const i = Math.floor(rnd(40 + salt, id * 7 + k, 0) * moves);
+    if (out[i] < 3) { out[i]++; extra--; }
+  }
+  return out;
+}
+function motifChordTone(target, lo, hi) {
+  let best = null, bd = 99;
+  for (let o = -2; o <= 3; o++) for (const c of MOTIF_CHORD) {
+    const v = c + o * 7;
+    if (v < lo || v > hi) continue;
+    const d = Math.abs(v - target);
+    if (d < bd) { bd = d; best = v; }
+  }
+  return best === null ? target : best;
+}
+const _motifs = {};
+function motifFor(id) {
+  if (_motifs[id]) return _motifs[id];
+  const n = MOTIF_N_LO + Math.floor(rnd(30, id, 0) * (MOTIF_N_HI - MOTIF_N_LO + 1));
+  // peakIdx must sit past the midpoint (a real climax, not a halfway point) and
+  // leave at least one note to descend to the ending. That window is only ever
+  // 1-2 slots wide, so sample it directly and uniformly instead of rounding a
+  // jittered target - the old formula skewed ~75/25 toward one edge of the window.
+  const peakLo = Math.floor((n - 1) / 2) + 1;
+  const peakHi = n - 2;
+  const peakIdx = peakHi >= peakLo
+    ? peakLo + Math.floor(rnd(31, id, 0) * (peakHi - peakLo + 1))
+    : Math.max(1, peakHi);
+  const riseMoves = peakIdx, fallMoves = n - 1 - peakIdx;
+  const start = MOTIF_CHORD[Math.floor(rnd(32, id, 0) * MOTIF_CHORD.length)];
+  const rise = riseMoves + Math.floor(rnd(33, id, 0) * 3);
+  const peak = start + rise;
+  const endTarget = peak - (fallMoves + Math.floor(rnd(34, id, 0) * 3));
+  const end = fallMoves > 0 ? motifChordTone(endTarget, start - 4, peak - 1) : peak;
+
+  const degs = [start];
+  motifSpread(rise, riseMoves, id, 0).forEach(m => degs.push(degs[degs.length - 1] + m));
+  if (fallMoves > 0) {
+    motifSpread(Math.max(peak - end, fallMoves), fallMoves, id, 5)
+      .forEach(m => degs.push(degs[degs.length - 1] - m));
+    degs[degs.length - 1] = end;
+  }
+  const pool = MOTIF_POS.slice(1), chosen = [0];
+  for (let i = 0; i < n - 1; i++) {
+    let p = pool[Math.floor(rnd(35, id, i) * pool.length)], guard = 0;
+    while (chosen.indexOf(p) >= 0 && guard++ < 12) p = pool[Math.floor(rnd(36, id, i * 13 + guard) * pool.length)];
+    if (chosen.indexOf(p) < 0) chosen.push(p);
+  }
+  chosen.sort((a, b) => a - b);
+  while (chosen.length < degs.length) degs.pop();
+  if (peakIdx < chosen.length) {
+    let best = chosen[peakIdx], bd = 99;
+    for (const st of MOTIF_STRONG) {
+      if (chosen.indexOf(st) >= 0 && st !== chosen[peakIdx]) continue;
+      const prev = peakIdx > 0 ? chosen[peakIdx - 1] : -1;
+      const nxt = peakIdx + 1 < chosen.length ? chosen[peakIdx + 1] : 99;
+      const d = Math.abs(st - chosen[peakIdx]);
+      if (st > prev && st < nxt && d < bd) { bd = d; best = st; }
+    }
+    chosen[peakIdx] = best;
+  }
+  let d2 = degs.slice(0, chosen.length);
+  const top = Math.max.apply(null, d2);
+  if (top > 6) { const sh = top - 6; d2 = d2.map(x => x - sh); }   // shift down, shape intact
+  const bot = Math.min.apply(null, d2);
+  if (bot < 0) d2 = d2.map(x => x - bot);
+  _motifs[id] = { steps: chosen, degs: d2 };
+  return _motifs[id];
+}
+
+// Pulled out of the motif's own voicePattern branch below (used by both its
+// gate and its note signal - kept as one function so they can't disagree).
+function motifNoteAt(step, bar) {
+  if (!MOTIF_ON) return null;
+  const inCycle = ((bar % MOTIF_CYCLE) + MOTIF_CYCLE) % MOTIF_CYCLE;
+  if (inCycle > 1) return null;               // the rest bar(s) between statements
+  const sec = Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const m = motifFor(songAtBar(bar) * 977 + sec);
+  const pos = inCycle * STEPS + step;
+  const i = m.steps.indexOf(pos);
+  if (i < 0) return null;
+  const statement = Math.floor(bar / MOTIF_CYCLE);
+  let deg = m.degs[i];
+  // repeat verbatim, then alter only the ending, every other statement
+  if (statement % 2 === 1 && i === m.degs.length - 1) deg = motifChordTone(deg - 2, 0, 6);
+  return deg;
+}
+
+// -- pattern libraries --------------------------------------------
+// Each entry is a list of 16th-note positions (0-15) where the voice hits.
+const HIT_HI = 0.97, HIT_LO = 0.02;
+function stepProfile(patterns, name, fallback) {
+  const hits = patterns[name] || patterns[fallback];
+  return Array.from({ length: 16 }, (_, i) => (hits.indexOf(i) >= 0 ? HIT_HI : HIT_LO));
+}
+
+const KICK_PATTERNS = {
+  '4x4':     [0, 4, 8, 12],
+  triplet:   [0, 3, 6, 8, 11, 14],
+};
+function kickProfile(name) { return stepProfile(KICK_PATTERNS, name, '4x4'); }
+
+const CLAP_PATTERNS = {
+  backbeat: [4, 12],
+  // no clap voice at all. clap isn't optional (it's always in the kit), so
+  // this can't force true silence - the anti-silence safeguard in origFor()
+  // below will still pick one lonely accent per song and hold it there
+  // (dubtechno's own use of this - see its preset comment above).
+  none:     [],
+};
+function clapProfile(name) { return stepProfile(CLAP_PATTERNS, name, 'backbeat'); }
+
+// downtempo's mid-bass pluck - lands on the 16ths the kick/sub-bass leave
+// open (kick's on 0/4/8/12, sub-bass on 2/6/10/14), interlocking with both
+// rather than doubling either. Taken directly off the spec's own table.
+const PLUCK_PATTERNS = {
+  offsync: [1, 3, 5, 9, 11, 13],
+};
+function pluckProfile(name) { return stepProfile(PLUCK_PATTERNS, name, 'offsync'); }
+
+// downtempo's polyrhythm percussion - hits every 3rd sixteenth (0,3,6,9,12,15),
+// a real 3-against-4 cross-rhythm against the 4/4 grid, not an approximation
+// of one. Taken directly off the spec's own table.
+const PERC_PATTERNS = {
+  threeFour: [0, 3, 6, 9, 12, 15],
+};
+function percProfile(name) { return stepProfile(PERC_PATTERNS, name, 'threeFour'); }
+
+// HAT_ROLL=1 swaps the accented hat profile for near-even rolling 16ths -
+// the constant tick-tick-tick under a psytrance bassline, rather than
+// techno's accented "e"/"a" pattern.
+const HAT_ACCENTED = [
+  0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20,
+  0.05,0.20,0.75,0.20, 0.05,0.20,0.75,0.20 ];
+const HAT_ROLLING = new Array(16).fill(0.90);
+function hatProfile(roll) { return roll ? HAT_ROLLING : HAT_ACCENTED; }
+
+// HAT_ACCENT (v64) - the real fix flagged during house's audit: hat had no
+// velocity-accent array at all (unlike kick's own hardcoded one below),
+// so its felt "shape" came entirely from HAT_ROLL's gate-probability
+// profile (which steps are likely to fire), not from any accenting -
+// meaningless for hatRoll:1 specifically, since HAT_ROLLING is flat 0.90
+// everywhere with no built-in emphasis. Real evidence, found for house:
+// "the key to making 16th-note hats work is velocity variation... accent
+// the offbeats (hits 2 and 4 of each group of four), downbeats quieter."
+// Not made per-mode - same precedent as kick's own accent array below,
+// which is a single shared shape, not a per-genre dial. Only actually
+// affects hatHuman:true modes (house/minimal/dubtechno/trance currently)
+// - hatHuman:false modes bypass v.accent entirely via their own
+// HAT_VEL_MAP (stepVelMap), a different mechanism (v32). Scoped to real
+// hits only, same as every other accent/velMap mechanism here - ghost
+// hits use the separate global GVEL formula, untouched by this.
+// Subtle multiplier (0.85/1.05), not a dramatic swing - a real but
+// gentle groove shape, not an obvious lurch.
+const HAT_ACCENT = [
+  0.85,1.05,0.85,1.05, 0.85,1.05,0.85,1.05,
+  0.85,1.05,0.85,1.05, 0.85,1.05,0.85,1.05 ];
+
+// Deterministic open-hat positions for modes where the open hat is a real,
+// regular groove element rather than an occasional accent - see isOpen()/
+// openHits below for why these skip the anti-clustering rule the rest of
+// the hat voice still uses.
+const HAT_OPEN_PATTERNS = {
+  offbeat: [2, 6, 10, 14],               // trance/psy (v52) - steady open "tss" on every off-beat
+  // dense (busier alternating open pairs) - no mode uses this since psy
+  // moved to 'offbeat' in v52 (real evidence pointed there instead, see
+  // that version's comment on psy's preset). Left defined, unused, rather
+  // than deleted - a future mode/citation may still want this exact shape.
+  dense:   [1, 2, 5, 6, 9, 10, 13, 14],
+  // lift (v63) - house. Real evidence: "the classic technique is to place
+  // an open hi-hat on the offbeat of beat 4... lifts the energy right
+  // before the bar loops, creating a sense of forward motion" - a single,
+  // precise anticipation cue, not a steady 4-per-bar groove element like
+  // 'offbeat'. Fully deterministic like every hatOpenPattern option here
+  // (see isOpen() below) - step 14 fires every bar, every SEED, no
+  // per-song variation at all, same rigidity 'offbeat' already has, just
+  // narrowed from 4 fixed positions to 1.
+  lift:    [14],
+};
+
+// Bass rhythm is a SHAPE, not a density dial - 'roll16' fires on nearly every
+// non-kick 16th (the original house/techno rolling bass, fine at ~125-150bpm)
+// while 'offbeat' fires only on the "and" of each beat (2,6,10,14 - 8th-note
+// spacing) - a sparser, more syncopated feel at any tempo without the
+// note-rate scaling out of control as BPM climbs. Add named shapes here as
+// you need them; kick steps are always silenced regardless (see
+// BASS_VOICE.avoid below), so a listed position that lands on a kick is just
+// a deliberate gap, not a bug.
+//
+// 'syncopated' (v62 - first mode to actually use it; was defined but unused
+// before this) - only 3 hits per bar, asymmetric spacing (2, 9, 12 - not
+// evenly divided like offbeat's 4-step grid), a genuinely different
+// rhythmic identity rather than a variant of offbeat's even spacing. Given
+// to minimal per user's explicit design call, not a citation - the AI-
+// generated bass-character source found right before this argued for
+// minimal's bass staying tight/repetitive/narrow-range, the opposite of
+// "more shapes." Documented as a deliberate creative choice, same
+// treatment as any other user-directed override in this project.
+// Reused for house (v68) - this time ON citation: "add off-beat bass
+// notes... at the 'and' of beats 1 and 3 and the sixteenth note before
+// beat 2" describes an asymmetric syncopated shape, not 'offbeat's even
+// 4-position spacing. The cited exact positions (roughly steps 2, 10, 3)
+// don't perfectly match this shape's own [2,9,12], but it's much closer
+// in spirit than 'offbeat' - reused as the cheaper option rather than
+// building a third bespoke shape for an approximate fit.
+const BASS_PATTERNS = {
+  offbeat:    [2, 6, 10, 14],
+  syncopated: [2, 9, 12],
+};
+function bassProfile(name, kickSteps) {
+  if (name === 'roll16') {
+    return kickSteps.map((isKick, s) => isKick ? 0 : (s % 4 === 2 ? BASS_OFFBEAT : BASS_SIXTEENTH));
+  }
+  const hits = BASS_PATTERNS[name] || BASS_PATTERNS.offbeat;
+  return kickSteps.map((isKick, s) => (isKick || hits.indexOf(s) < 0) ? 0 : BASS_OFFBEAT);
+}
+
+
+const VOICES = [
+  { name: 'kick', note: 36, songStable: true, include: 1.00, ghost: KICK_GHOST_PRESET, drift: 0, dropsOut: KICK_DROPS_OUT,
+    vel: [0.88, 0.96],
+    accent: [1.00,1,1,1, 0.95,1,1,1, 0.975,1,1,1, 0.95,1,1,1],
+    velMap: KICK_HUMAN_PRESET ? null : KICK_VEL_MAP,
+    profile: kickProfile(KICK_PATTERN) },
+  { name: 'hat',  note: 42, rest: 0.10, include: 1.00, ghost: HAT_GHOST_PRESET, drift: HAT_DRIFT_PRESET, dropsOut: KIT_DROPS_OUT_PRESET,
+    openNote: 46, openInclude: 0.75, openPattern: HAT_OPEN_PATTERN,
+    openProfile: [0,0,0.02,0, 0,0,0.10,0, 0,0,0.02,0, 0,0,0.45,0.05],
+    stepVelMap: HAT_HUMAN_PRESET ? null : HAT_VEL_MAP, accent: HAT_ACCENT,
+    nudge: HAT_NUDGE_MS, profile: hatProfile(HAT_ROLL) },
+  // SNARE_NUDGE_MS nudges THIS voice, not the separate optional 'snare'
+  // ghost-fill voice below - clap is the always-in-kit backbeat hit that
+  // actually matches a genre spec's "snare/clap" row (position-for-position,
+  // e.g. CLAP_PATTERNS.backbeat = [4,12]); the optional 'snare' is a
+  // different, probabilistic secondary layer that may not even be in the
+  // kit for a given song.
+  { name: 'clap', note: 39, rest: 0.25, include: 0.95, ghost: 0.40 * KIT_GHOST_SCALE, drift: 0.40 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    vel: [KIT_VEL_LO_PRESET, KIT_VEL_HI_PRESET],
+    nudge: SNARE_NUDGE_MS, profile: clapProfile(CLAP_PATTERN) },
+  { name: 'rim',  note: 37, rest: 0.30, include: RIM_INCLUDE, ghost: 0.30 * KIT_GHOST_SCALE, drift: 1.00 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    vel: [KIT_VEL_LO_PRESET, KIT_VEL_HI_PRESET],
+    profile: [0.50, 0.08, 0.18] },
+
+  // Note choices are strict GM from here down, same as kick/hat/clap/rim
+  // above - snare/ride/lowtom/midtom/crash used to each quietly mix in a
+  // tom note that didn't match their own name (lowtom was GM 44, Pedal
+  // Hi-Hat, not a tom at all). Fixed to only ever play the sound the name
+  // promises.
+  { name: 'snare', notes: [38, 40], optional: true, rest: 0.30, include: OPTIONAL_INCLUDE.snare, ghost: 0.30 * KIT_GHOST_SCALE, drift: 0.30 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    vel: [KIT_VEL_LO_PRESET, KIT_VEL_HI_PRESET], profile: [
+    0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.02,
+    0.02,0.02,0.02,0.02, 0.70,0.02,0.02,0.04 ] },
+
+  // notes:[51,50] (v57, was [51,59]) - 59 (Ride Cymbal 2) is a real GM
+  // note but falls outside this project's now-preferred 36-51 range (see
+  // shaker's own comment below for the full reasoning) - remapped to 50
+  // (High Tom, previously unused) instead of dropped, keeping the
+  // two-option variety this voice had before.
+  { name: 'ride', notes: [51, 50], optional: true, rest: 0.30, include: OPTIONAL_INCLUDE.ride, ghost: 0.60 * KIT_GHOST_SCALE, drift: 0.50 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    minEnergy: 65,
+    accent: [0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1, 0.80,1,1,1],
+    profile: [
+    0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04,
+    0.50,0.04,0.70,0.04, 0.50,0.04,0.70,0.04 ] },
+
+  { name: 'lowtom', notes: [41, 45], optional: true, rest: 0.35, include: OPTIONAL_INCLUDE.lowtom, ghost: 0.25 * KIT_GHOST_SCALE, drift: 0.80 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    minEnergy: 35, profile: [0.38, 0.06, 0.06, 0.18, 0.06] },
+
+  { name: 'midtom', notes: [47, 48], optional: true, rest: 0.35, include: OPTIONAL_INCLUDE.midtom, ghost: 0.25 * KIT_GHOST_SCALE, drift: 0.80 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    minEnergy: 45, profile: [0.34, 0.05, 0.12, 0.05, 0.18, 0.05, 0.09] },
+
+  // notes:[49,43] (v57, was [49,57]) - same 36-51 remap as ride above; 57
+  // (Crash Cymbal 2) moved to 43 (High Floor Tom, previously unused).
+  { name: 'crash', notes: [49, 43], optional: true, include: OPTIONAL_INCLUDE.crash, role: 'marker' },
+
+  // Shaker note:44 (v57, was 82) - user's real-world observation: many
+  // Ableton kits, especially simple/experimental ones, don't have
+  // anything mapped outside a 36-51 range. 82 was technically a correct
+  // GM note (Shaker), but it's a GM2 extension - the original GM1 spec
+  // only covers 35-81, so a lot of kits never bothered implementing
+  // anything past 81, let alone 82. Remapped to 44 (Pedal Hi-Hat,
+  // previously unused) - closest in character to a continuous groove
+  // texture among the free slots, though the GM label no longer matches;
+  // acceptable since custom/experimental kits (this project's actual use
+  // case going forward) don't depend on GM note names meaning anything.
+  // include is per-mode like every other optional voice, high for psy/
+  // house/minimal (continuous shaker/perc texture), low or 0 elsewhere.
+  { name: 'shaker', note: 44, optional: true, rest: 0.20, include: OPTIONAL_INCLUDE.shaker, ghost: 0.50 * KIT_GHOST_SCALE, drift: 0.60 * KIT_DRIFT_SCALE, dropsOut: KIT_DROPS_OUT_PRESET,
+    profile: [0.70,0.10,0.70,0.10, 0.70,0.10,0.70,0.10, 0.70,0.10,0.70,0.10, 0.70,0.10,0.70,0.10] },
+
+  // restGuaranteeOnBoost (v29, renamed v41 once a second, different kind
+  // of "guarantee on boost" existed for motif/stab/pad - see that comment
+  // below for why they needed a distinct name and mechanism) - see
+  // POST_DROP_BOOST's own comment above and the gate() function below for
+  // the mechanism. Bass is the one voice that needed this: kick has no
+  // `rest` field at all (can't be silenced by anything but dropsOut mid-
+  // breakdown, already guaranteed the instant a breakdown ends), but
+  // bass's own section-level rest chance could still silence it during
+  // the post-drop peak window, undercutting "the drop" - ghost/velocity
+  // alone read as busier, not as a real hit, without the actual rhythm
+  // section guaranteed present.
+  { name: 'bass', rest: 0.12, include: 1.00, ghost: 0, drift: BASS_DRIFT_PRESET, dropsOut: BASS_DROPS_OUT_PRESET,
+    restGuaranteeOnBoost: true,
+    pitched: true, pitchChoices: BASS_CHOICES_SET, clip: BASS_CLIP, chan: bassChan, profile: null },
+
+  // no `rest` field - role:'motif' returns early in voicePattern() below,
+  // before restsAt/the skeleton machinery is ever consulted, so a rest
+  // value here would be silently unused. (Found by tune-sweep.mjs's own
+  // rest-streak sweep skipping motif for exactly this reason - see its
+  // VOICE_REST comment.) motifCycle/the rest-bar-between-statements logic
+  // in motifNoteAt() is motif's actual "how often it plays" control.
+  // kitGuaranteeOnBoost (v41) - see gate()'s own comment for the mechanism
+  // (motif's own copy of this check is above, in its role:'motif' branch).
+  // Applies unconditionally here rather than behind a new per-mode field:
+  // st.boost is already provably 0 for every mode except techno
+  // (postDropBoost is 0 everywhere else), so this is already a genre-
+  // scoped no-op without needing a second switch.
+  { name: 'motif', include: MOTIF_ON ? MOTIF_INCLUDE_PRESET : 0, kitGuaranteeOnBoost: true, role: 'motif', chan: motifChan,
+    clip: MOTIF_CLIP, vel: [0.66, 0.86] },
+
+  { name: 'stab', rest: STAB_REST, include: STAB_ON ? STAB_INCLUDE_PRESET : 0, kitGuaranteeOnBoost: true, dropsOut: KIT_DROPS_OUT_PRESET, ghost: 0, drift: STAB_DRIFT_PRESET,
+    pitched: true, chordTones: STAB_CHORD_TONES, clip: STAB_CLIP, chan: stabChan,
+    vel: [0.62, 0.82], profile: [
+    0.02,0.02,0.35,0.04, 0.02,0.02,0.30,0.04,
+    0.02,0.02,0.35,0.04, 0.02,0.06,0.40,0.08 ] },
+
+  // dropsOut deliberately false - the pad should be one of the things still
+  // standing through a breakdown, not silenced with the kick/bass. One
+  // retrigger per bar (profile hits only step 0) plus a near-full-bar clip
+  // is the "held chord that follows the changes" approximation - see the
+  // "-- pad --" section above for the PAD_CLIP scale explanation.
+  // ghost:0 deliberately, unlike other voices - an extra "ghost" hit is a
+  // harmless accent on a drum, but on a sustained voice it retriggers the
+  // chord early and cuts the held note short mid-ring.
+  { name: 'pad', rest: 0.15, include: PAD_ON ? PAD_INCLUDE_PRESET : 0, kitGuaranteeOnBoost: true, ghost: 0, drift: 0.10,
+    dropsOut: false, pitched: true, chordTones: PAD_CHORD_TONES, chordOctave: PAD_OCTAVE,
+    clip: PAD_CLIP, chan: padChan, vel: [0.35, 0.55],
+    profile: [0.97,0.02,0.02,0.02, 0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02, 0.02,0.02,0.02,0.02] },
+
+  // dropsOut deliberately false - see "-- pluck --" above (the spec's own
+  // breakdown keeps this running while kick/sub-bass cut out).
+  { name: 'pluck', rest: 0.15, include: PLUCK_ON ? 1.00 : 0, ghost: 0, drift: 0.20,
+    dropsOut: false, pitched: true, pitchChoices: BASS_CHOICES_SET, pitchOctave: PLUCK_OCTAVE,
+    clip: PLUCK_CLIP, chan: stabChan, vel: [0.55, 0.80],
+    profile: pluckProfile(PLUCK_PATTERN) },
+
+  // dropsOut deliberately false - same reasoning as pluck above.
+  { name: 'perc', notes: PERC_NOTES, rest: 0.15, include: PERC_ON ? 1.00 : 0, ghost: 0.15, drift: 0.25,
+    dropsOut: false, profile: percProfile(PERC_PATTERN) },
+];
+
+const voiceNamed = n => VOICES.filter(v => v.name === n)[0];
+const KICK_VOICE = voiceNamed('kick');
+KICK_VOICE.drift = 0;
+// v44 fix: this used to roll KICK_STEPS probabilistically (rnd(0, ...) < p)
+// - a SEPARATE, independent computation from origFor()'s own roll for
+// kick's actual rendered pattern just below, which (since KICK_VOICE.drift
+// is unconditionally 0, set on the line above) always takes the
+// DETERMINISTIC branch there (`p >= 0.5`), not this probabilistic one.
+// Two computations of the same fact, free to disagree: KICK_PATTERN's
+// profile values are HIT_HI/HIT_LO (97%/2%), so for any given SEED there
+// was a real per-position chance this array said "kick hits here" (or
+// doesn't) when the actual rendered kick pattern disagreed - meaning
+// BASS_VOICE.avoid below could silence bass at a step kick doesn't
+// actually occupy, or fail to avoid a step it does, exactly the collision
+// `avoid` exists to prevent. Measured before fixing, not just estimated:
+// simulating both formulas across 2000 seeds for '4x4' put the per-
+// position disagreement at ~2%, but with 16 positions rolled per song
+// that compounds to ~30% of SEEDs having at least one mismatched step -
+// a common case, not a rare edge case. Same bug shape as the DnB Engine
+// sibling project's own v5 `origOverride` fix (found while rebuilding that
+// engine closely enough off this one to need to understand this exact
+// mechanism, not found by auditing this file directly). Fixed by reading
+// the same deterministic formula origFor() uses instead of re-rolling -
+// the anti-empty-pattern fallback origFor() also has (picks a random
+// strong position if the roll produces an all-false array) is not
+// replicated here on purpose: it's structurally unreachable for
+// KICK_PATTERN's own real profiles ('4x4' and 'triplet' both always have
+// real HIT_HI positions), not an oversight.
+const KICK_STEPS = KICK_VOICE.profile.map(p => p >= 0.5);
+const BASS_VOICE = voiceNamed('bass');
+BASS_VOICE.avoid = KICK_STEPS;
+BASS_VOICE.profile = bassProfile(BASS_PATTERN, KICK_STEPS);
+
+// Shared by any 'pitched' voice (bass, voice) - vi already differentiates them,
+// so they never draw the same sequence even with the same rnd() kind.
+function pitchChoiceAt(vi, step, sec, choices) {
+  const r = rnd(21, vi * 997 + step, sec);
+  let acc = 0;
+  for (const c of choices) { acc += c.w; if (r < acc) return c; }
+  return choices[0];
+}
+
+const CRASH_AT_SECTION = 0.45;
+const CRASH_VEL_LO = 0.80, CRASH_VEL_HI = 0.95;
+const OPEN_ACCENT = 1.10;
+
+// Kit membership is per song, so a new song is genuinely a new kit. Every voice
+// stays in the stack and is gated instead, the same way minEnergy gates.
+const _kits = {};
+function kitFor(song) {
+  if (_kits[song]) return _kits[song];
+  const core = VOICES.filter(v => !v.optional && rnd(11, VOICES.indexOf(v), song) < v.include);
+  const opts = VOICES.filter(v => v.optional)
+    .map(v => ({ v, r: rnd(12, VOICES.indexOf(v), song) }))
+    .filter(o => o.r < o.v.include)
+    .sort((a, b) => a.r - b.r)
+    .slice(0, MAX_OPTIONAL)
+    .map(o => o.v);
+  const names = {};
+  core.concat(opts).forEach(v => { names[v.name] = true; });
+  // HARMONY_MIN_COUNT (v38) - motif/stab/pad each roll independently
+  // (v36/v37's random per-song mix), which can land on 0 or 1 of the
+  // three - "just drums and bass" or "just a lonely motif with nothing
+  // under it" are both too thin for techno (dubtechno already owns the
+  // genuinely sparse end of this engine). If fewer than HARMONY_MIN_COUNT
+  // of HARMONY_VOICE_NAMES made it in on their own, randomly (seeded, so
+  // it still varies by song) promote enough of the ones that didn't to
+  // reach the floor - which two (or three) show up stays real variety,
+  // only the COUNT is guaranteed. 0 for every mode except techno (2) - a
+  // genuine no-op elsewhere, not a special case.
+  if (HARMONY_MIN_COUNT > 0) {
+    // rnd kind 13 - crash's own marker roll used to share this kind (see
+    // its own comment, v70) despite being an unrelated system. Kept as
+    // 13 here since this was the original owner; crash moved to kind 29
+    // instead.
+    const harmonyVoices = VOICES.filter(v => HARMONY_VOICE_NAMES.includes(v.name) && v.include > 0);
+    const present = harmonyVoices.filter(v => names[v.name]);
+    const missing = harmonyVoices.filter(v => !names[v.name])
+      .map(v => ({ v, r: rnd(13, VOICES.indexOf(v), song) }))
+      .sort((a, b) => a.r - b.r)
+      .map(o => o.v);
+    let have = present.length;
+    while (have < HARMONY_MIN_COUNT && missing.length) {
+      names[missing.shift().name] = true;
+      have++;
+    }
+  }
+  _kits[song] = names;
+  return names;
+}
+const KIT = VOICES;
+
+// SECTION (governs crash-marker cadence, profile-drift pacing, rest-section
+// length, motif regeneration cadence) is computed up near the phrase()/
+// drop-walk constants now, from sectionSeconds in MODE_PRESETS - see the
+// "real-time arrangement pacing" block above SONG_DROPS.
+const DRIFT_CHANCE = 0.5;
+const MAX_DRIFT = 3;
+
+// The profile itself drifts too, not just the skeleton rolled from it. Same
+// cadence as the skeleton (checked once per SECTION) and the same per-voice
+// drift knob, so the kick, at drift 0, never moves. Caged to a band around
+// the printed value rather than reset only at song boundaries: a set runs
+// for hours inside one song, and a value that only moved at song turnover
+// would jump, not creep.
+const PROFILE_DRIFT_CHANCE = 0.20; // per SECTION, times v.drift
+const PROFILE_DRIFT_AMOUNT = 0.05; // size of one nudge
+// PROFILE_DRIFT_BAND (v70, was a flat 0.25 for every voice) - the actual
+// bug an external review caught: DRIFT_CHANCE and PROFILE_DRIFT_CHANCE
+// both already scale by v.drift (how OFTEN a nudge fires), but the band
+// itself (how FAR a nudge can travel) never did - so even a mode asking
+// for maximum drift (1.00) could never get more excursion than a barely-
+// drifting one, just more frequent attempts at the same narrow range.
+// Measured before fixing: for a step at a high baseline (e.g. hatRoll:1's
+// flat 0.90), the old flat 0.25 band caps the low end at 0.65 - still a
+// 65% chance of re-confirming "on" even at the extreme of the band, so
+// skelAt()'s re-roll (rnd() < profileAt()[step]) almost never actually
+// flips the step, regardless of how high v.drift is. Simulated the fix
+// (band scaled by v.drift, base 0.55) against the old flat 0.25 over a
+// full song's worth of sections: unconstrained modes (house/psy/trance/
+// minimal's kit, anywhere hatRoll:1 lives) now genuinely cross into
+// flip-favoring territory in ~31% of songs (0% before) - the actual
+// Reich-style paradox now achievable, not just a number that visibly
+// moves without changing the audible pattern. Checked this doesn't leak
+// into the mechanical/static modes: at techno's drift:0.50 the effective
+// band is 0.28 (never crosses), at dubtechno's drift:0.20 it's 0.11
+// (never crosses) - both stay exactly as tight as their own citations
+// already established, unaffected by this. See profileAt() below for
+// where this is now multiplied by v.drift at the point of use.
+const PROFILE_DRIFT_BAND   = 0.55; // max distance from the printed value AT drift:1.00 - scaled by v.drift below, clamped to 0..1
+
+// Per-voice micro-timing: v.nudge is either a flat ms number (the whole
+// voice shifts uniformly - a laid-back snare/clap) or a [oddMs, evenMs] pair
+// (opposite nudges for odd/even 16ths - a shuffled hi-hat) - undefined or
+// all-zero means no nudge, which is every voice that doesn't set it. ms is
+// converted to a fraction of a bar via SECS_PER_BAR, the same real-time-to-
+// cycle conversion already used for SECTION/dropBars elsewhere in this file.
+// Applied per-voice INSIDE voicePattern, before the channel-level swingBy()
+// in withSwing below - deliberately, not the other way round. These nudges
+// are single-digit-to-low-double-digit ms, a small fraction of a 16th note's
+// duration at any BPM this engine runs, so they land nowhere near the
+// swing grid's own coarser 8th/16th boundaries and the two layers don't
+// fight in practice. If a future mode wants a much larger nudge, re-check
+// that assumption before trusting it blindly.
+// The flat case is one .late() call - trivial, and a true no-op (same
+// pattern object, not even wrapped) when the ms is 0, so every voice that
+// doesn't request a nudge is byte-for-byte unaffected. The parity case masks
+// the already-finished pattern into its odd/even-step halves and shifts each
+// independently, since late()/early() only take one constant offset for an
+// entire pattern, not a per-step-varying one.
+function nudgeSec(ms) { return (ms / 1000) / SECS_PER_BAR; }
+function applyNudge(pat, nudge) {
+  if (nudge === undefined) return pat;
+  if (!Array.isArray(nudge)) return nudge === 0 ? pat : pat.late(nudgeSec(nudge));
+  const [oddMs, evenMs] = nudge;
+  if (oddMs === 0 && evenMs === 0) return pat;
+  const oddMask  = sig(t => stepBar(t)[0] % 2 === 1).segment(STEPS);
+  const evenMask = sig(t => stepBar(t)[0] % 2 === 0).segment(STEPS);
+  return stack(pat.mask(oddMask).late(nudgeSec(oddMs)), pat.mask(evenMask).late(nudgeSec(evenMs)));
+}
+
+function voicePattern(v, vi) {
+  const nn = v.notes ? v.notes[Math.floor(rnd(15, vi, 0) * v.notes.length) % v.notes.length] : v.note;
+
+  if (v.role === 'marker') {
+    const mgate = sig(t => {
+      const [step, bar] = stepBar(t);
+      if (step !== 0) return false;
+      if (!kitFor(songAtBar(bar))[v.name]) return false;
+      if (bar % BARS_PER_PHRASE === 0) {
+        const ph = Math.floor(bar / BARS_PER_PHRASE);
+        if (ph > 0 && !phrase(ph).drop && phrase(ph - 1).drop) return true;
+      }
+      if (bar % (BARS_PER_PHRASE * SECTION) !== 0) return false;
+      // rnd kind 29 (v70, was 13) - crash was sharing kind 13 with the
+      // harmony backfill roll in kitFor() (an external review caught
+      // this). They never actually collided (crash is voice index 8,
+      // harmony voices are 11/12/13, so the two rnd() calls' arguments
+      // never matched) - but it was a live, unnecessary correlation
+      // hazard, not a real bug yet. Given its own kind so the two
+      // systems can never accidentally correlate if voice order ever
+      // changes.
+      return rnd(29, vi, bar) < CRASH_AT_SECTION * efrac(phrase(Math.floor(bar / BARS_PER_PHRASE)));
+    }).segment(STEPS);
+    const mvel = sig(t => CRASH_VEL_LO + rnd(14, vi, Math.floor(t)) * (CRASH_VEL_HI - CRASH_VEL_LO)).segment(STEPS);
+    return note(nn).struct(mgate).velocity(mvel);
+  }
+
+  // ---- the lead: a 2-bar motif, repeated, then its ending altered ----
+  if (v.role === 'motif') {
+    const g2 = sig(t => {
+      const [step, bar] = stepBar(t);
+      if (!MOTIF_ON) return false;
+      // kitGuaranteeOnBoost (v41) - motif has its own separate kit check
+      // here (it never reaches the shared gate() below), same override
+      // needed: see gate()'s own comment for the full reasoning.
+      const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+      if (!kitFor(songAtBar(bar))[v.name] && !(v.kitGuaranteeOnBoost && st.boost > 0)) return false;
+      return motifNoteAt(step, bar) !== null;
+    }).segment(STEPS);
+    const n2 = sig(t => {
+      const [step, bar] = stepBar(t);
+      const sc = scaleAtBar(bar);
+      const noteDeg = motifNoteAt(step, bar);
+      const d = noteDeg === null ? 0 : noteDeg;
+      const o = Math.floor(d / 7), ix = ((d % 7) + 7) % 7;
+      return MOTIF_OCTAVE + sc.root + sc.steps[ix] + 12 * o;
+    }).segment(STEPS);
+    const v2 = sig(t => {
+      const [step, bar] = stepBar(t);
+      return v.vel[0] + rnd(2, vi * 997 + step, bar) * (v.vel[1] - v.vel[0]);
+    }).segment(STEPS);
+    const outM = note(n2).struct(g2).velocity(v2);
+    return v.clip !== undefined ? outM.clip(v.clip) : outM;
+  }
+
+  // The kick keeps one skeleton across every song - it is the grid, and the
+  // bass avoid list is derived from it once at load. Everything else gets a
+  // fresh pattern when the song turns over.
+  // A voice's pattern is as long as its profile. 16 lines up with the bar. 3, 5
+  // or 7 do not divide into 16, so the pattern walks around the bar and only
+  // realigns every lcm(len,16) steps. That is Reich's phasing, on a drum grid.
+  const len = v.profile.length;
+  const maxDrift = Math.max(1, Math.min(MAX_DRIFT, Math.floor(len / 3)));
+  const songOf = song => v.songStable ? 0 : song;
+  const _origs = {};
+  function origFor(song) {
+    const k = songOf(song);
+    if (_origs[k]) return _origs[k];
+    // drift:0 means this voice's skeleton must never deviate from its
+    // profile at all - not just "no further wander after the first roll."
+    // The stochastic roll below (HIT_HI/HIT_LO = 97%/2%, not 100%/0%) can
+    // still miss a real hit or add a stray one on that first roll, and with
+    // no drift to ever correct it, a bad roll then freezes in for the whole
+    // song. kick is the only voice that sets drift:0 (it's "the grid," see
+    // VOICES above) - found live, not by inspection: v11/v12 both signed
+    // off on kick's skeleton as unconditionally exact, and it wasn't. A
+    // deterministic threshold reproduces KICK_PATTERN exactly every time
+    // instead of leaving it to per-song chance.
+    const o = v.drift === 0
+      ? v.profile.map(p => p >= 0.5)
+      : v.profile.map((p, s2) => rnd(0, vi * 997 + s2, k) < p);
+    if (!o.some(Boolean)) {
+      const peak = Math.max.apply(null, v.profile);
+      const strong = [];
+      v.profile.forEach((p, s2) => { if (p >= peak / 2) strong.push(s2); });
+      o[strong[Math.floor(rnd(22, vi, k) * strong.length) % strong.length]] = true;
+    }
+    _origs[k] = o;
+    return o;
+  }
+
+  // The profile is its own slow chain, one step nudged at a time, caged to
+  // PROFILE_DRIFT_BAND around the printed value in v.profile. It is keyed and
+  // paced exactly like the skeleton chain below, just with a different kind
+  // per rnd() call so the two systems never correlate.
+  const _profiles = {};
+  function profileAt(sec, song) {
+    const k = songOf(song);
+    const chain = _profiles[k] || (_profiles[k] = [v.profile.slice()]);
+    return growChain(chain, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(26, vi * 997 + k, n) < PROFILE_DRIFT_CHANCE * v.drift) {
+        const step = Math.floor(rnd(27, vi * 997 + k, n) * len) % len;
+        const dir  = rnd(28, vi * 997 + step + k, n) < 0.5 ? -1 : 1;
+        const base = v.profile[step];
+        const band = PROFILE_DRIFT_BAND * v.drift; // v70 - was unscaled, see this const's own comment above
+        const lo   = Math.max(0, base - band);
+        const hi   = Math.min(1, base + band);
+        const nudged = Math.max(lo, Math.min(hi, prev[step] + dir * PROFILE_DRIFT_AMOUNT));
+        if (nudged !== prev[step]) {
+          next = prev.slice();
+          next[step] = nudged;
+        }
+      }
+      return next;
+    });
+  }
+
+  const _chains = {};
+  function skelAt(sec, song) {
+    const k = songOf(song);
+    const orig = origFor(song);
+    const chain = _chains[k] || (_chains[k] = [orig]);
+    return growChain(chain, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(8, vi * 997 + k, n) < DRIFT_CHANCE * v.drift) {
+        const step = Math.floor(rnd(9, vi * 997 + k, n) * len) % len;
+        const val  = rnd(10, vi * 997 + step + k, n) < profileAt(n, song)[step];
+        if (val !== prev[step]) {
+          const cand = prev.slice();
+          cand[step] = val;
+          let d = 0;
+          for (let i = 0; i < len; i++) if (cand[i] !== orig[i]) d++;
+          if (d <= maxDrift) next = cand;
+        }
+      }
+      return next;
+    });
+  }
+
+  const secOf = bar => Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const idxAt = (step, bar) => (bar * STEPS + step) % len;
+  // a voice sits out a whole section. Different from a drop, which is
+  // kick+bass leaving together at high energy. This is one voice, any energy.
+  // An independent per-section coin-flip re-rolled forever has an unbounded
+  // tail (the same shape breakdown length used to have), so it's capped -
+  // but PROPORTIONAL to this voice's own restChance, not a flat number.
+  // A flat cap punishes a high restChance the hardest: at REST_CAP_MULT/(1-
+  // restChance), a voice barely ever hits the cap at low restChance (it
+  // rarely runs long anyway), but a voice deliberately set to rest most of
+  // the time (restChance near the 0.75 ceiling) gets enough room for that
+  // to actually show up as "mostly resting" instead of being overridden by
+  // the cap into "mostly playing" - see the note above SECTION for the
+  // flat-cap version of this bug (dubtechno's voice, capped at exactly 1
+  // consecutive section, actually rested only 43% of the time).
+  const restChance = Math.max(0, Math.min(0.75, (v.rest || 0) * SPARSE));
+  const maxRestStreak = Math.max(1, Math.ceil(REST_CAP_MULT / (1 - restChance)));
+  const _restsChain = [];
+  function restsAtSection(sec) {
+    return growChain(_restsChain, sec, arr => {
+      const n = arr.length;
+      let streak = 0;
+      for (let i = n - 1; i >= 0 && arr[i]; i--) streak++;
+      const forced = streak >= maxRestStreak;
+      return !forced && rnd(23, vi, n) < restChance;
+    });
+  }
+  const restsAt = bar => restChance > 0 && restsAtSection(secOf(bar));
+
+  function lift(bar) {
+    if (bar % BARS_PER_PHRASE !== BARS_PER_PHRASE - 1) return 1;
+    const phraseInSection = Math.floor(bar / BARS_PER_PHRASE) % SECTION;
+    return phraseInSection === SECTION - 1 ? SECTION_LIFT : PHRASE_LIFT;
+  }
+  const isPickup = (step, bar) => skelAt(secOf(bar), songAtBar(bar))[(idxAt(step, bar) + 1) % len];
+
+  const voiceFloor = (v.vel ? v.vel[0] : SKEL_VEL_LO) *
+                     (v.accent ? Math.min.apply(null, v.accent) : 1);
+  const ghostCeil = voiceFloor - 0.02;
+
+  // v.openPattern (hatOpenPattern in MODE_PRESETS) is the deterministic path
+  // used by techno/house/trance/psy/downtempo/dubtechno - see
+  // HAT_OPEN_PATTERNS above for why the distance-3
+  // anti-clustering rule below doesn't apply there (it was never modeling
+  // real hi-hat physics - a subsequent closed hit chokes a ringing open one
+  // automatically, standard "choke group" behavior at the receiving
+  // instrument, not something this sequencer needs to enforce). Every other
+  // mode keeps the original probabilistic-accent-with-anti-clustering
+  // behavior untouched, since v.openPattern is undefined for them.
+  const openHits = v.openPattern ? HAT_OPEN_PATTERNS[v.openPattern] : null;
+  const useOpen = openHits ? true : (v.openNote ? rnd(17, vi, 0) < v.openInclude : false);
+  const rawOpen = (step, bar) => rnd(16, vi * 997 + step, bar) < v.openProfile[step];
+  function isOpen(step, bar) {
+    if (openHits) return openHits.indexOf(step) >= 0;
+    if (!useOpen || !rawOpen(step, bar)) return false;
+    for (let k = 1; k <= 3; k++) {
+      let s = step - k, b = bar;
+      if (s < 0) { s += STEPS; b -= 1; }
+      if (b >= 0 && rawOpen(s, b)) return false;
+    }
+    return true;
+  }
+  const openAt = (step, bar) => v.openNote && skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)] && isOpen(step, bar);
+
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (v.dropsOut && st.drop) return false;
+    if (v.minEnergy !== undefined && st.e < v.minEnergy) return false;
+    if (v.avoid && v.avoid[step]) return false;
+    // kitGuaranteeOnBoost (v41): the post-drop peak window overrides this
+    // voice's own song-level kit-membership roll - motif/stab/pad are
+    // guaranteed present (all three, together) for the duration of the
+    // window, regardless of what that song's own kitFor() combo happened
+    // to be, matching the "full drums, bass, the hook... the chorus"
+    // description of that moment as the fullest point in the arrangement,
+    // not just whatever pair the song normally carries. No-op whenever
+    // st.boost is 0 (every mode without a real postDropBoost, and this
+    // mode outside that window) - falls through to the normal per-song
+    // kit check exactly as before.
+    if (!kitFor(songAtBar(bar))[v.name] && !(v.kitGuaranteeOnBoost && st.boost > 0)) return false;
+    // restGuaranteeOnBoost (v29): the post-drop peak window overrides this
+    // voice's own section-rest chance rather than being subject to it -
+    // "the drop" needs the rhythm section actually guaranteed present, not
+    // just probably present. No-op whenever st.boost is 0 (every mode
+    // without a real postDropBoost, and this mode outside that window).
+    if (restsAt(bar) && !(v.restGuaranteeOnBoost && st.boost > 0)) return false;
+    if (skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)]) return true;
+    const w = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
+    const shaped = w * MAX_GHOST * v.ghost * lift(bar) *
+                   (isPickup(step, bar) ? PICKUP_BIAS : PICKUP_ELSE);
+    return rnd(1, vi * 997 + step, bar) < shaped;
+  }).segment(STEPS);
+
+  // v.velMap (kick only, kickHuman:false modes - see KICK_VEL_MAP above):
+  // no accent shape, no per-hit rnd() jitter, no per-bar drift - a fixed
+  // 8-entry velocity lookup, indexed by hit ORDER (not step position) so it
+  // still works if KICK_PATTERN is ever 'triplet' instead of '4x4'. Hit
+  // positions are read straight off v.profile rather than a separate
+  // constant, since that's already exactly where kickProfile() put them.
+  const velMapHitSteps = v.velMap ? v.profile.reduce((acc, p, i) => { if (p >= 0.5) acc.push(i); return acc; }, []) : null;
+
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    if (skelAt(secOf(bar), songAtBar(bar))[idxAt(step, bar)]) {
+      if (v.velMap) {
+        const hitIdx = (bar * velMapHitSteps.length + velMapHitSteps.indexOf(step)) % v.velMap.length;
+        return v.velMap[hitIdx];
+      }
+      // stepVelMap (v32, hat) - same "mechanical but not always the same"
+      // idea as velMap above, indexed by absolute step position instead
+      // of hit order (see HAT_VEL_MAP's own comment for why). Real hits
+      // only, same scoping as velMap - ghost hits keep their own quieter
+      // formula below so they still read as ghost fills, not full hits.
+      if (v.stepVelMap) {
+        const idx = (bar * STEPS + step) % v.stepVelMap.length;
+        return v.stepVelMap[idx];
+      }
+      const vlo  = v.vel ? v.vel[0] : SKEL_VEL_LO;
+      const vhi  = v.vel ? v.vel[1] : SKEL_VEL_HI;
+      const acc = (v.accent ? v.accent[step] : 1) * (openAt(step, bar) ? OPEN_ACCENT : 1);
+      const hiA = Math.min(1, vhi * acc);
+      const loA = Math.min(hiA, vlo * acc);
+      return loA + rnd(2, vi * 997 + step, bar) * (hiA - loA);
+    }
+    const f  = efrac(phrase(Math.floor(bar / BARS_PER_PHRASE)));
+    const lo = GVEL_LO_A + f * (GVEL_LO_B - GVEL_LO_A);
+    const hi = GVEL_HI_A + f * (GVEL_HI_B - GVEL_HI_A);
+    const pk = isPickup(step, bar) ? PICKUP_VEL : 1;
+    const hiG = Math.min(ghostCeil, hi * pk);
+    const loG = Math.min(hiG, lo * pk);
+    return loG + rnd(3, vi * 997 + step, bar) * (hiG - loG);
+  }).segment(STEPS);
+
+  const noteSig = v.pitched
+    ? sig(t => {
+        const [step, bar] = stepBar(t);
+        const sc  = scaleAtBar(bar);
+        const oct = v.pitchOctave !== undefined ? v.pitchOctave : BASS_OCTAVE;
+        const c   = pitchChoiceAt(vi, step, secOf(bar), v.pitchChoices || BASS_CHOICES);
+        return oct + sc.root + sc.steps[c.idx] + 12 * c.oct;
+      }).segment(STEPS)
+    : v.openNote
+      ? sig(t => { const [step, bar] = stepBar(t); return openAt(step, bar) ? v.openNote : nn; }).segment(STEPS)
+      : nn;
+
+  if (v.chordTones) {
+    const chordOct = v.chordOctave !== undefined ? v.chordOctave : STAB_OCTAVE;
+    const layers = v.chordTones.map(idx => {
+      const s = sig(t => {
+        const sc = scaleAtBar(Math.floor(t));
+        return chordOct + sc.root + sc.steps[idx];
+      }).segment(STEPS);
+      const layer = note(s).struct(gate).velocity(vel);
+      return v.clip !== undefined ? layer.clip(v.clip) : layer;
+    });
+    // applyNudge (v70) - this branch used to return before reaching the
+    // applyNudge call below, so any nudge set on a chordTones voice
+    // (stab/pad) was silently dropped - an external review caught this.
+    // No mode currently sets v.nudge on stab/pad, so this was dormant,
+    // not an active bug - fixed so it doesn't silently break the first
+    // time someone adds one.
+    return applyNudge(stack.apply(null, layers), v.nudge);
+  }
+
+  const out = note(noteSig).struct(gate).velocity(vel);
+  const clipped = v.clip !== undefined ? out.clip(v.clip) : out;
+  return applyNudge(clipped, v.nudge);
+}
+
+const withSwing = p => SWING > 0 ? p.swingBy(SWING, SWING_GRID) : p;
+const patternsFor = pred =>
+  stack(...KIT.filter(pred).map(v => voicePattern(v, VOICES.indexOf(v))));
+
+const chanOf = v => v.chan !== undefined ? v.chan : drumChan;
+const usedChans = KIT.map(chanOf).filter((c, i, a) => a.indexOf(c) === i).sort((a, b) => a - b);
+
+stack(
+  ...usedChans.map(ch => {
+    const p = patternsFor(v => chanOf(v) === ch);
+    return withSwing(p).midichan(ch);
+  })
+).midi(midi)
