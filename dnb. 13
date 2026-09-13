@@ -1,0 +1,1652 @@
+// THE BASS ENGINE - dev (fully commented) - v13
+// The bass-driven sibling to "Ship of Theseus (no voice)". That project's
+// whole architecture is kick-driven (kick decided first, songStable, bass
+// told to avoid its steps) - it fits techno/house/trance/psy/dubtechno/
+// downtempo natively, but is backwards for genres where the bass/808/sub-
+// line IS the actual rhythmic and harmonic backbone: kick reinforces or
+// drops out, not the other way around. This engine exists for that family.
+//
+// v1-v2 (as "Trap Engine") were single-genre, trap only. v3 generalizes the
+// same proven core into a MODE_PRESETS-driven multi-genre engine, the exact
+// same pattern Ship of Theseus itself uses - one shared engine, per-genre
+// dial settings, not one file per genre (see that project's own CLAUDE.md
+// for why: the shared machinery - seeded hash PRNG, energy/breakdown walk,
+// key/scale system, per-voice skeleton+drift+rest, ghost/wander, motif
+// generator - is genuinely genre-agnostic and was real work to get right
+// once; duplicating it per genre would just be drift risk for no benefit).
+// `trap` below is a byte-for-byte port of v2's hardcoded values into preset
+// fields - a pure refactor, not a retune. Three presets this engine exists
+// for today - trap, dub, dubstep - are built (see the MODE_PRESETS comment
+// below for what each needed).
+//
+// v9 renamed a since-removed fourth genre `dnb` -> `dnbHalftime` after real
+// drum & bass research found its v3-v8 comments' framing backwards, and
+// v10 added a proper mainstream/dancefloor `dnb` preset alongside it. Both
+// are gone as of v11 - not lost, forked out to the standalone "DnB Engine"
+// sibling project once a follow-up audit found `dnb`'s own bass pattern was
+// being derived FROM the documented kick/breakbeat positions, backwards
+// from this engine's bass-leads-kick premise, because this file had no
+// mechanism to represent DnB's real kick-leads-breakbeat identity any other
+// way. See MODE_PRESETS' own comment block below for the full removal
+// note, and "DnB Engine"'s own CLAUDE.md for the fork's full reasoning and
+// what changed once DnB had its own file to fix it in properly. This
+// engine's job from here is trap/dub/dubstep - if you're tempted to add a
+// DnB-lineage genre back in, it belongs in the DnB Engine sibling project,
+// not here.
+//
+// v12 adds a second lead-melody shape: motifStyle ('arch', the original
+// generator, or 'arp', new). Researched before building, not assumed -
+// arpeggiated leads are a real, separately-citable convention for both
+// genres that use motifOn: trap's "arpeggiated and gated synth leads...
+// minor triads, 1/16th note" is a documented standard technique, and
+// melodic dubstep names "arpeggiated synth motifs" as a defining palette
+// element, run continuously and quietly under the track (not restated-
+// every-N-bars like this engine's original arch motif) specifically so
+// there's still melody once the bass takes over. No citation found for an
+// arpeggiated lead in dub, which doesn't use motifOn anyway (skank already
+// fills dub's harmonic-texture role) - left alone rather than guessed.
+// motifStyle:'arp' reuses the EXISTING chord-degree/scale-root machinery
+// motifPattern() already shared with bass808Pattern() via chordDegreeAt() -
+// that coupling (lead and bass agreeing on the current local chord root)
+// predates this change; what's new is the arpeggio CONTOUR itself
+// (motifArpDegAt()) and continuous 16th-note gating, not the root-sync.
+// User's own call on the contour: seeded-shuffle random order through the
+// chord tones (a real, cited arpeggiator mode) rather than the also-cited
+// up-only/up-down modes - reshuffled every full pass through the triad, not
+// re-rolled note-by-note, so it can't fall into the same "unbounded tail,
+// most-likely-outcome-is-degenerate" shape this project's Working Style
+// section already warns about.
+//
+// Companion file: "Bass Engine live.js" - terse twin, same values/logic, `// set:`
+// hints only, what actually gets pasted into Strudel. Edit here first,
+// mirror into the live file, bump both versions, verify parity - same
+// discipline the Ship of Theseus project uses (see its CLAUDE.md).
+// ============================================================
+//  Everything you touch mid-set is in this block. Nothing below it.
+// ============================================================
+
+const midi = 'IAC Driver Bus 1';   // your MIDI port
+
+// -- the two you'll actually reach for -------------------------
+const SEED     = 7;      // track change. New 808 line, new roll placement, new kit.
+const OPEN_KEY = '6m';   // key, Camelot notation. 6m = D minor.
+
+// -- tempo --------------------------------------------------------
+//   trap     130-170 (commonly ~140-150, felt half-time - snare/clap on
+//            beat 3, not the 2-and-4 backbeat, same convention Ship of
+//            Theseus already validated for dubstep)
+//   dub      60-90 (classic one-drop range; not yet set below - flagged,
+//            not fixed here, per the user's own call to handle tempo)
+//   dubstep  138-142 (canonical dubstep tempo, felt half-time like trap -
+//            same range Ship of Theseus's own now-retired dubstep mode
+//            validated)
+//   (dnb/dnbHalftime tempo guidance moved with them to "DnB Engine" in v11)
+const BPM = 140;
+const BPM_RAMP_SECONDS = 8;
+
+if (typeof setcpm !== 'undefined') {
+  const _tempo = (globalThis.__bassEngineTempo = globalThis.__bassEngineTempo || { bpm: undefined, timer: null });
+  if (_tempo.timer) { clearInterval(_tempo.timer); _tempo.timer = null; }
+  if (_tempo.bpm === undefined || BPM_RAMP_SECONDS <= 0 || _tempo.bpm === BPM) {
+    _tempo.bpm = BPM;
+    setcpm(BPM / 4);
+  } else {
+    const fromBpm = _tempo.bpm, toBpm = BPM, stepMs = 100;
+    const steps = Math.max(1, Math.round(BPM_RAMP_SECONDS * 1000 / stepMs));
+    let step = 0;
+    _tempo.timer = setInterval(() => {
+      step += 1;
+      const t = Math.min(1, step / steps);
+      _tempo.bpm = fromBpm + (toBpm - fromBpm) * t;
+      setcpm(_tempo.bpm / 4);
+      if (t >= 1) { clearInterval(_tempo.timer); _tempo.timer = null; }
+    }, stepMs);
+  }
+}
+
+// -- mode ---------------------------------------------------------
+//   trap/dub/dubstep - all three built out, see the MODE_PRESETS comment
+//   block below for what each needed and its sourcing.
+const MODE = 'trap';
+
+// Nudge ONE field away from the chosen mode's preset without switching
+// modes. Field names match the keys in MODE_PRESETS below.
+const MODE_OVERRIDES = {};
+
+// ============================================================
+//  Below here is the engine. You should not need to touch it.
+// ============================================================
+
+const drumChan = 1, bass808Chan = 2, leadChan = 3, skankChan = 4;
+
+const STEPS = 16;       // bar grid for kick/snare/808/melody
+const HAT_STEPS = 32;   // hats run on a FINER grid - a roll needs room to
+                         // pack more than 16 hits/bar into a single beat.
+                         // Every other voice stays on the coarser 16-grid.
+const BARS_PER_PHRASE = 4;
+
+const sig = (typeof signal !== 'undefined') ? signal : (f) => time.fmap(f);
+
+// ---- reused verbatim from Ship of Theseus: seeded hash PRNG, its growing-
+// memoized-chain helper, and the (step,bar) decomposition every per-16th
+// signal callback needs. None of this is genre-specific. ----
+function rnd(kind, a, b) {
+  let h = (kind * 374761393 + a * 668265263 + b * 2246822519 + SEED * 3266489917) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = Math.imul(h ^ (h >>> 16), 2246822507);
+  h = h ^ (h >>> 15);
+  return (h >>> 0) / 4294967296;
+}
+function growChain(arr, i, step) {
+  if (!(i >= 0)) i = 0;
+  i = Math.min(i, arr.length + 4096);
+  while (arr.length <= i) arr.push(step(arr));
+  return arr[i];
+}
+// steps param lets the hat voice use its own finer grid (HAT_STEPS) while
+// everything else uses the default (STEPS).
+const stepBar = (t, steps = STEPS) => [Math.floor(t * steps) % steps, Math.floor(t)];
+
+function weightedChoice(kind, vi, step, sec, choices) {
+  const r = rnd(kind, vi * 997 + step, sec);
+  let acc = 0;
+  for (const c of choices) { acc += c.w; if (r < acc) return c; }
+  return choices[0];
+}
+
+// ============================================================
+//  MODE_PRESETS - the actual per-genre bundle. See the field-by-field
+//  sourcing comment on MODE_PRESETS.trap below for what everything means
+//  and where it came from.
+//
+//  HONEST STATE (v11): all three genres this engine exists for - trap,
+//  dub, dubstep - are built. See each preset's own comments below for full
+//  sourcing; the summary here is what each needed beyond a mechanical
+//  preset port.
+//
+//  dub needed two real new mechanisms: a skank voice (channel 4,
+//  skankPattern() below - off-beat muted chord chops, the reggae/dub
+//  guitar's signature move, same idea as Ship of Theseus's own now-retired
+//  skank voice) and a kickDropsOut flag (kick now CONDITIONALLY survives a
+//  breakdown instead of always dropping with the 808 - trap's "kick only
+//  exists to reinforce the 808, so it drops when the 808 does" isn't
+//  universal; dub's one-drop kick+snare unit keeps pulsing through a
+//  breakdown per Ship of Theseus's own retired dub research: "kick stays,
+//  bass still drops normally"). kickReinforce itself did NOT need
+//  replacing - one-drop's kick+bass togetherness on beat 3 fits the
+//  existing "kick reinforces 808 hits" mechanism fine once the 808 pattern
+//  has a real, dominant hit AT beat 3 to lock onto.
+//
+//  dubstep needed nothing new - preset values only, leaning on the same
+//  halftime-snare and kick-reinforces-bass machinery trap and dub already
+//  proved, with dub's kickDropsOut:true flipped back to match trap's
+//  reasoning instead (dubstep's build/drop structure strips to atmosphere,
+//  not a one-drop kick that stays).
+//
+//  dnb/dnbHalftime (mainstream DnB and Halftime, v9-v10) lived here
+//  through v10 - see this file's own prior versions or git history for the
+//  full presets. REMOVED in v11: a follow-up audit found `dnb`'s bass
+//  pattern was being derived FROM the documented kick/breakbeat positions,
+//  backwards from this engine's bass-leads-kick premise, because this file
+//  had no mechanism to represent DnB's real kick-leads-breakbeat identity
+//  any other way. `dnbHalftime` genuinely does fit this engine's
+//  architecture (same as trap/dubstep) but moved anyway, by explicit user
+//  choice, so the whole DnB-engine family stays together in its own proper
+//  home. Both now live in the standalone "DnB Engine" sibling project,
+//  which gives `dnb` a real kick-leads mechanism instead of forcing it
+//  through this file's bass-leads-only shape - see that project's own
+//  CLAUDE.md for the fork's full reasoning.
+// ============================================================
+const MODE_PRESETS = {
+  // trap - ported directly from v2's hardcoded constants, one field per
+  // constant, same values, same logic. Every comment below is carried over
+  // from where that value originally lived; nothing was retuned in this
+  // port.
+  trap: {
+    // -- 808 (the genre's actual backbone - see bass808Pattern() below) --
+    // Hand-designed, NOT a documented statistical convention - unlike, say,
+    // the Amen break (which has real canonical breakpoints), trap 808
+    // patterns vary enormously track to track and there is no single
+    // citable "the" trap 808 rhythm. This is one idiomatically syncopated
+    // shape (hit on 1, a quick pickup on the "e" of 1, a syncopated run
+    // around beats 2-3, an anticipation into the next bar) - refine by ear
+    // against a real reference track, the same honesty Ship of Theseus
+    // asks for when no rigorous evidence exists.
+    bass808Pattern: [0, 3, 7, 10, 13],
+    bass808Octave: 36,
+    bass808Drift: 0.35,
+    bass808Rest: 0.10,
+    // True 808 slide/glide (continuous pitch-bend between notes) is real
+    // trap production practice but NOT attempted here - it would need
+    // Strudel's own pitch-bend/`.slide()`-equivalent verified live first
+    // (the same "flag the assumption, don't fake it" stance Ship of
+    // Theseus took with `.mask()`). What's here instead: note CHOICES
+    // weighted toward stepwise-connected motion (root/5th, an octave-down
+    // sub hit, a b7 passing tone) rather than random jumps - an honest
+    // approximation of the FEEL, not the actual glide.
+    bass808Choices: [
+      { idx: 0, oct: 0,  w: 0.70 }, // root - the anchor
+      { idx: 4, oct: 0,  w: 0.18 }, // 5th - the most common connecting motion
+      { idx: 0, oct: -1, w: 0.07 }, // octave down - the classic sub-drop hit
+      { idx: 6, oct: -1, w: 0.05 }, // b7 down an octave - dark passing tone
+    ],
+    // "808 variation" phrase-ending operation - bias toward the more
+    // unstable/dramatic choices (octave-drop, b7) right on the phrase's
+    // last bar, a lightweight flourish that reuses weightedChoice() with a
+    // different table rather than a new mechanism.
+    bass808ChoicesEnd: [
+      { idx: 0, oct: 0,  w: 0.40 },
+      { idx: 4, oct: 0,  w: 0.15 },
+      { idx: 0, oct: -1, w: 0.30 },
+      { idx: 6, oct: -1, w: 0.15 },
+    ],
+
+    // -- kick (follows the 808, does not lead it - see kickPattern() below) --
+    // Reversed from Ship of Theseus's whole-project convention on purpose:
+    // there, kick is decided first and bass avoids its steps. Here the 808
+    // is decided first, and the kick's own positions are a SUBSET of the
+    // 808's - "does this 808 hit get reinforced by a kick" is itself a
+    // stable, slowly-drifting per-song choice (same skeleton mechanism as
+    // everything else), not re-rolled every bar. kickReinforce is the
+    // fraction of 808 hits that get a simultaneous kick - trap kicks are
+    // usually short/tight and don't double every 808 hit (that would just
+    // read as a louder 808, not a kick). Reasonable middle estimate, not a
+    // hard citation, same as bass808Pattern above.
+    kickReinforce: 0.6,
+    // low - which 808 hits get doubled shouldn't flip constantly, or the
+    // kick stops reading as "attached to" specific 808 hits at all.
+    kickReinforceDrift: 0.15,
+    // rare extra syncopated kick in an 808 GAP - kept low, trap kicks are
+    // sparse, not busy.
+    kickGhost: 0.06,
+    // beat 1 as the kick's own anchor point is close to a universal drum-
+    // programming convention, independent of genre - treating it as just
+    // another 808-reinforce position undersells it, especially since
+    // kickReinforceDrift can let that mechanism wander away from step 0
+    // for stretches. This is a SEPARATE, independent, per-song stable roll
+    // (not tied to whether the 808 happens to hit step 0 at all, so it
+    // holds even if bass808Pattern changes). High but not absolute,
+    // matching "high probability" rather than "always."
+    kickBeat1Chance: 0.85,
+    // "kick variation" phrase-ending operation - extra syncopated ghost
+    // kicks leading into the phrase boundary.
+    kickFillBoost: 2.5,
+    // trap's whole identity is 808-and-kick-as-one-instrument - when the
+    // 808 drops out for a breakdown, the kick (which exists only to
+    // reinforce it) should too. See dub's own kickDropsOut for the
+    // opposite case and why.
+    kickDropsOut: true,
+
+    // -- snare/clap (half-time, beat 3 - see snarePattern() below) --
+    // Same halftime convention Ship of Theseus already validated for
+    // dubstep (CLAP_PATTERNS.halftime = [8]) - both genres share the same
+    // "written fast, felt half-time" relationship between tempo and pulse.
+    snarePattern: [8],
+    snareDrift: 0.30,
+    snareRest: 0.15,
+    snareGhost: 0.30,
+    // "snare fill" phrase-ending operation - more ghost hits leading into
+    // the phrase boundary, reusing the existing ghost mechanism rather
+    // than a separate roll.
+    snareFillBoost: 2.2,
+    // A researched trap grammar reference (user-supplied) is explicit that
+    // timing here should be "100% quantization by default, swing 0,
+    // microtiming/humanization OPTIONAL, and DO NOT enforce fixed
+    // millisecond offsets." An earlier version had this at a nonzero
+    // constant applied via .late() to every snare hit - that's literally a
+    // fixed millisecond offset, exactly what the rule says not to do (a
+    // constant nudge reads as mechanical over a long set - real "human"
+    // timing variation is a distribution, not a repeated number). Kept at
+    // 0 - the underlying "laid-back snare" production knowledge was real,
+    // but a single constant push was the wrong SHAPE to express it in, not
+    // just the wrong number. True per-hit-varying humanization would need
+    // Strudel's .late()/.early() verified to accept a per-event signal
+    // rather than only a constant - not attempted, same "flag the
+    // assumption, don't fake it" stance as the 808 glide above.
+    snareNudgeMs: 0,
+
+    // -- hats (the signature move - see hatPattern() below) --
+    // Trap's identifying gesture isn't a density dial, it's a
+    // probabilistic BURST: a beat's normal 16th-note pace suddenly packs
+    // in extra hits (a "roll"), then drops back. rollOn is the on/off -
+    // false for genres that don't want this mechanism at all (same
+    // pattern as Ship of Theseus's hatRollOn, which this was ported FROM).
+    rollOn: true,
+    hatBaseSubsteps: [0, 2, 4, 6],  // plain straight 16ths within a beat's 8 sub-steps
+    rollBaseChance: 0.12,            // ~1 roll every ~8 beats outside phrase-end boosts
+    rollPhraseEndMult: 2.5,          // far more likely as a fill into a phrase boundary
+    rollLengths: [{ n: 6, w: 0.45 }, { n: 8, w: 0.55 }],
+    // Base (resting) pattern is plain straight 16ths, NOT swung - real trap
+    // hats are typically dead straight; the bounce comes from roll
+    // placement and velocity shaping, not timing swing.
+    // swingPct:50 is a true no-op (SWING = (50-50)/50 = 0, withSwing()
+    // below skips the .swingBy() call entirely rather than calling it with
+    // a zero amount) - deliberately straight, not "no mechanism exists" -
+    // v4 added a real withSwing()/SWING_GRID mechanism (ported directly
+    // from Ship of Theseus's own, already-proven one) once dub needed it
+    // for real. See MODE_PRESETS.dub's own swingPct for the mode that
+    // actually uses it.
+    swingPct: 50,
+    swingGrid: 8,
+
+    // -- harmony --
+    // Trap is overwhelmingly minor-key, which scaleMode:'natural' still
+    // defaults to - but a researched trap grammar reference (user-
+    // supplied) specifically calls out Phrygian as a real available
+    // harmonic system, and that one IS well-documented (dark-trap/drill
+    // melodic runs using the Phrygian b2), unlike harmonic minor (no case
+    // found for that one). phrygianChance decides which minor FLAVOR a
+    // song uses, a separate axis from the key's own major/relative-minor
+    // relationship - decided once per song (same "stable per song"
+    // pattern as everything else that shouldn't flip mid-track), moderate
+    // chance since natural minor is still the more common trap default.
+    scaleMode: 'natural',
+    phrygianChance: 0.35,
+    // modest - trap has no strong "key-lift into the drop" convention the
+    // way trance does (that's an EDM technique); no citation found either
+    // way, kept low on purpose.
+    keyMoveChance: 0.08,
+    // Harmony here is short repeating progressions (single-chord/pedal, a
+    // 2-chord loop, or a 3-4 chord loop), a genuinely different thing from
+    // the slow, multi-minute key-drift mechanism above (long-term key
+    // movement, not a bar-to-bar progression within a phrase). One chord
+    // per bar, one loop template chosen per song (stable for the whole
+    // track, matching how a real trap beat's progression usually doesn't
+    // change mid-song). Templates and weights are a reasonable estimate of
+    // relative frequency, not a citation - i-VI and i-VII are the most
+    // commonly cited trap/pop-minor progressions, pedal/single-chord is
+    // also common (especially haunting, 808-led beats), i-iv and the
+    // 4-chord loop are real but less dominant. Degrees: 0=i, 5=VI, 6=VII,
+    // 3=iv - all diatonic to whatever scale/key is already active.
+    chordLoopTemplates: [
+      { degs: [0],          w: 0.30 }, // single-chord/pedal
+      { degs: [0, 5],       w: 0.25 }, // i - VI
+      { degs: [0, 6],       w: 0.20 }, // i - VII
+      { degs: [0, 3],       w: 0.15 }, // i - iv
+      { degs: [0, 5, 6, 5], w: 0.10 }, // i - VI - VII - VI
+    ],
+    chordLoopBarLen: 1, // bars per chord - one change per bar is typical trap pacing
+
+    // -- melody (sparse, minimal lead - see motifPattern() below) --
+    // Trap melodic leads (bell/pluck/piano) are famously minimal, often
+    // just 2-4 notes, present for a couple of bars then silent for several
+    // more - motifCycle:4 (a 2-bar phrase that only restates every 4 bars,
+    // so it's silent half the time) and the [2,4] note range reflect that
+    // directly.
+    motifOn: true,
+    // 'arp' (v12): "arpeggiated and gated synth leads... minor triads and
+    // 1/16th note LFOs" is cited as a standard trap lead technique -
+    // genuinely different from the sparse arch-shaped hook this engine
+    // originally had, not a retune of it. See motifArpDegAt() below.
+    motifStyle: 'arp',
+    // v13 correction (see motifArpDegAt()'s own comment for the full
+    // "sounds off" story): 8th notes, not literal continuous 16ths - tried
+    // at 16ths first per the citation above, reported too fast/machine-
+    // gun-like by ear, backed off while staying denser than dubstep's
+    // sparser motifArpDiv:4 (matches the relative gap the two genres'
+    // sourcing actually supports).
+    motifArpDiv: 2,
+    // No citation prefers one arpeggiator mode over another for trap
+    // specifically - hand-designed weighting, mostly the two fixed/
+    // repeating shapes (up, updown) that actually read as a phrase, random
+    // kept as a minority accent rather than the constant mode v12 had.
+    motifArpOrders: [
+      { order: 'up',     w: 0.40 },
+      { order: 'updown', w: 0.45 },
+      { order: 'random', w: 0.15 },
+    ],
+    motifCycle: 4,
+    motifNoteRange: [2, 4],
+    motifOctave: 72, // bell/pluck register, well clear of the 808
+    motifClip: 0.55, // short and plucky, not sustained
+
+    // -- skank (off for trap - see dub for the mode that actually uses this) --
+    skankOn: false,
+    skankPattern: [2, 6, 10, 14],
+    skankDrift: 0.25,
+    skankRest: 0.15,
+    skankGhost: 0,
+    skankOctave: 67,
+    skankClip: 0.25,
+
+    // -- arrangement --
+    // trap's hook/beat-switch cadence is nowhere near as rigorously
+    // documented as EDM breakdown timing (no canonical "trap breakdown
+    // length" the way techno/trance have researched conventions) - kept at
+    // a moderate default consistent with Ship of Theseus's own least-
+    // committal mode ("custom"), not a hard citation.
+    dropPatience: 15,
+    dropBars: 6,
+    // trap tracks commonly run 2.5-4 minutes, noticeably shorter than the
+    // 6-8 minute DJ-tool length of most house/techno - a genuinely well-
+    // documented genre convention (streaming-era hip-hop/trap runtimes),
+    // unlike dropPatience/dropBars above.
+    songMinutes: 3.2,
+    sectionSeconds: 32, // ~8 bars at this tempo - one verse/hook length
+    sparse: 1.1,
+  },
+
+  // dub - reggae/dub's one-drop: nothing on beat 1, kick+snare land TOGETHER
+  // on beat 3 - that togetherness IS the genre's name ("dropping" the beat
+  // on 3). Renamed from "reggae" on purpose, same reasoning Ship of
+  // Theseus's own (now-retired) dub mode used: dub versions are
+  // instrumental remixes, which is exactly what a MIDI rhythm-section
+  // engine can actually produce - drum+bass+skank, no vocal, no claim to
+  // more than that.
+  dub: {
+    // Deliberately sparse and deliberately silent on beat 1 (step 0) - real
+    // one-drop bass leaves the same space the drums do. Two hits: the drop
+    // itself (step 8, beat 3 - where kick+snare also land) and an
+    // anticipation into the next bar (step 14, the "and" of 4, a classic
+    // reggae bass turnaround). This is a genuinely different design
+    // approach from trap's own bass808Pattern (5 hits, syncopated,
+    // starting on beat 1) for a specific mechanical reason, not just genre
+    // flavor: kickReinforce below is a FLAT rate applied to every
+    // bass808Pattern hit position equally - there's no per-position
+    // weighting in this engine yet. A very sparse pattern is what lets
+    // one-drop's "everything centers on beat 3" character come through
+    // cleanly with the existing flat-rate mechanism, rather than needing a
+    // new per-position-weighted one. If a future mode wants MORE bass
+    // movement with kick reinforcement concentrated on just one of those
+    // hits, that's the point where this mechanism would need extending.
+    bass808Pattern: [8, 14],
+    bass808Octave: 36,
+    // Low - dub's rhythm section ("riddim") is famously hypnotic and
+    // repetitive; a real dub mix restates the same riddim for many minutes
+    // with only slow variation, unlike trap's more restless 808 lines.
+    bass808Drift: 0.15,
+    // Low - one-drop bass is disciplined and reliable, not sparse-random;
+    // it's supposed to be there every time.
+    bass808Rest: 0.05,
+    // Root-and-fifth, not root-and-occasional-everything-else - directly
+    // reused from Ship of Theseus's own (now-retired) BASS_CHOICES_DUBBY,
+    // real reasoning that still applies: the 5th gets real harmonic weight
+    // here, unlike trap's more root-anchored, rarely-wandering line.
+    bass808Choices: [
+      { idx: 0, oct: 0,  w: 0.55 },
+      { idx: 4, oct: 0,  w: 0.30 },
+      { idx: 0, oct: 1,  w: 0.10 },
+      { idx: 2, oct: 0,  w: 0.05 },
+    ],
+    // Dub doesn't have trap's "dramatic flourish right before the phrase
+    // boundary" convention - no citation found for one, so no separate
+    // end-of-phrase table; same choices used throughout, which is itself a
+    // deliberate decision, not an oversight.
+    bass808ChoicesEnd: [
+      { idx: 0, oct: 0,  w: 0.55 },
+      { idx: 4, oct: 0,  w: 0.30 },
+      { idx: 0, oct: 1,  w: 0.10 },
+      { idx: 2, oct: 0,  w: 0.05 },
+    ],
+
+    // High and stable - one-drop's whole identity depends on kick and bass
+    // reliably landing together on the same hits (there are only two to
+    // reinforce here, so "high" reads as "dependable," not "busy").
+    kickReinforce: 0.85,
+    kickReinforceDrift: 0.10, // very low - this coupling should barely ever wander
+    kickGhost: 0, // zero, not just low - one-drop's whole point is disciplined sparseness, no stray syncopation
+    // ZERO, not "low but present" like trap's 0.85 - one-drop is DEFINED by
+    // the absence of beat 1. This has to be a hard 0 to be genre-accurate,
+    // not a probability that occasionally violates the genre's own name.
+    kickBeat1Chance: 0,
+    kickFillBoost: 1.5, // modest - no strong evidence for a dramatic phrase-end kick fill in dub
+    // FALSE, unlike trap - the reasoning that made trap's kick drop out
+    // with the 808 (kick only exists to reinforce it) doesn't hold here.
+    // Ship of Theseus's own (now-retired) dub mode found the opposite:
+    // "real dub mixing strips back to the rhythm section rather than away
+    // from it - kick stays, bass still drops normally." kickPattern()'s
+    // gate below only checks st.drop when this is true, so the kick (and
+    // snare, which one-drop treats as the same unit) keeps its own
+    // slowly-drifting pattern alive through a breakdown instead of cutting
+    // out with the 808.
+    kickDropsOut: false,
+
+    // Same [8] as trap's snarePattern, for a genuinely different reason -
+    // not a copy-paste, a coincidence worth naming: trap's beat 3 is a
+    // half-time-felt convention, dub's beat 3 is the literal one-drop.
+    snarePattern: [8],
+    snareDrift: 0.15, // lower than trap's 0.30 - one-drop's snare position is extremely stable, core to the genre's identity
+    snareRest: 0.05,  // low - this hit is reliably there
+    snareGhost: 0.10, // low - dub isn't about busy ghost-note snare fills, it's minimal
+    snareFillBoost: 1.5,
+    // The strongest evidence of any value in this file: reggae/dub's
+    // "behind the beat" one-drop pocket (the loose, human feel documented
+    // from King Tubby-era dub engineering onward) is genuinely genre-
+    // defining production knowledge, not folklore - directly reused from
+    // Ship of Theseus's own (now-retired) dub research. Applied via the
+    // existing applyNudge() mechanism (already wired to the snare voice,
+    // just at 0 for trap) - a real, if narrower, claim than the grid-wide
+    // swing below: "this one hit sits behind the grid," not "every other
+    // 16th does." The two mechanisms are complementary, not redundant -
+    // both were kept.
+    snareNudgeMs: 12,
+
+    rollOn: false, // hat rolls aren't a dub/reggae convention - trap's signature move, not a genre-agnostic one
+    // Steady 8th-note pulse (shaker/hat), sparser than trap's straight
+    // 16ths - dub's percussion breathes more, less continuously busy.
+    hatBaseSubsteps: [0, 4],
+    // rollBaseChance/rollPhraseEndMult/rollLengths are irrelevant once
+    // rollOn is false (rollAt() returns null immediately) but still need
+    // valid values since the code reads them unconditionally - kept at
+    // trap's own numbers as harmless placeholders, not a claim they'd fit
+    // dub if rollOn were ever flipped on.
+    rollBaseChance: 0.12,
+    rollPhraseEndMult: 2.5,
+    rollLengths: [{ n: 6, w: 0.45 }, { n: 8, w: 0.55 }],
+    // The heaviest swing value Ship of Theseus's whole file had, directly
+    // reused from its own (now-retired) dub research: "matching the
+    // genre's syncopated identity." Applied per-channel via withSwing()
+    // below (ported directly from that project's own, already-proven
+    // mechanism, same swingBy(SWING, SWING_GRID) call) - real grid-wide
+    // shuffle across bass/kick/snare/hats/skank together, not just the one
+    // voice snareNudgeMs above reaches.
+    swingPct: 58,
+    swingGrid: 8,
+
+    scaleMode: 'natural',
+    phrygianChance: 0, // Phrygian is a trap/drill thing, not a dub one - no case found, kept off entirely rather than a nonzero guess
+    // Very low - dub is harmonically static over a long mix, matching Ship
+    // of Theseus's own dubtechno (0.03, the lowest value that file had) for
+    // the same "very static" genre character, not a coincidence.
+    keyMoveChance: 0.03,
+    // Dub/reggae harmony is famously minimal - heavy pedal weighting, with
+    // real movement toward the root-fourth vamp (i-iv), one of the two most
+    // commonly cited reggae progressions alongside i-VI. Dropped the
+    // 4-chord loop entirely for dub - that's more a pop-song device than a
+    // riddim one, no evidence found for it here.
+    chordLoopTemplates: [
+      { degs: [0],    w: 0.45 }, // single-chord/pedal - the classic riddim vamp
+      { degs: [0, 3], w: 0.30 }, // i - iv
+      { degs: [0, 5], w: 0.15 }, // i - VI
+      { degs: [0, 6], w: 0.10 }, // i - VII
+    ],
+    // 2 bars per chord, not trap's 1 - dub's harmonic rhythm is slower and
+    // more spacious, matching the genre's generally unhurried pacing.
+    chordLoopBarLen: 2,
+
+    // No synth lead - Ship of Theseus's own (now-retired) dub research
+    // found the same: a dub instrumental's top line IS the vocal it's
+    // remixing (absent here, honestly, same gap that project's dub mode
+    // had), not a synth hook this engine could compose instead. The range/
+    // octave/clip fields below are never actually read once motifOn is
+    // false (motifPattern()'s gate always returns false) - kept at trap's
+    // own numbers as harmless placeholders, not a claim they'd fit dub.
+    motifOn: false,
+    // Never read once motifOn is false, same idiom as trap's own inert
+    // skank block - kept at a valid value, not a claim it'd fit dub.
+    motifStyle: 'arch',
+    // Also never read while motifOn is false - same placeholder idiom.
+    motifArpDiv: 2,
+    motifArpOrders: [
+      { order: 'up',     w: 0.40 },
+      { order: 'updown', w: 0.45 },
+      { order: 'random', w: 0.15 },
+    ],
+    motifCycle: 4,
+    motifNoteRange: [2, 4],
+    motifOctave: 72,
+    motifClip: 0.55,
+
+    // -- skank (channel 4, skankPattern() below) - THE thing this engine
+    // didn't have before dub needed it. Off-beat, muted chord chops on the
+    // "ands" (steps 2/6/10/14) - the reggae/dub guitar's defining move,
+    // directly reused from Ship of Theseus's own (now-retired) skank
+    // voice, same pattern/octave/clip values, same reasoning: near-
+    // scratch staccato, sitting above the bass on a guitar's top strings.
+    skankOn: true,
+    skankPattern: [2, 6, 10, 14],
+    skankDrift: 0.20,
+    skankRest: 0.10, // low - skank is a near-constant presence in reggae/dub, not an occasional texture
+    skankGhost: 0.15, // directly reused from Ship of Theseus's own (now-retired) skank voice
+    skankOctave: 67,
+    skankClip: 0.25,
+
+    // dropPatience/dropBars/songMinutes/sectionSeconds/sparse all directly
+    // reused from Ship of Theseus's own (now-retired) dub mode - real
+    // research done there, not re-derived from nothing: dropPatience:-15
+    // pushes the breakdown-trigger window below E_START (a chance exists
+    // from bar one - dub's loose, exploratory mixing finds a breakdown
+    // easily), songMinutes:25.9 matches how long a real dub mix/set runs
+    // (far longer than trap's streaming-era 3.2), sparse:1.4 matches the
+    // genre's spacious, lots-of-rest character.
+    dropPatience: -15,
+    dropBars: 6,
+    songMinutes: 25.9,
+    sectionSeconds: 48,
+    sparse: 1.4,
+  },
+
+  // dubstep - halftime snare on beat 3 (same convention trap and dub both
+  // already carry, all three genuinely share it - see dub's own comment
+  // on snarePattern), but the bass replaces one-drop's disciplined
+  // minimalism with dubstep's own signature: a syncopated, sustained
+  // "wobble" bass that dominates the mix. Can't do the actual wobble here
+  // (continuous filter-cutoff LFO movement) - same MIDI-only limitation as
+  // trap's 808 slide, flagged not faked. bass808Pattern instead leans on
+  // real syncopation/anticipation around the halftime grid to approximate
+  // the FEEL.
+  dubstep: {
+    // Hand-designed, not a citable canonical pattern - same honesty as
+    // trap's own bass808Pattern (no single "the" dubstep bass rhythm
+    // exists any more than there's one trap rhythm). Anchor on beat 1
+    // (the sub drop), an early syncopated push (step 5, the "e" of beat
+    // 2), a hit reinforcing beat 3 alongside kick+snare (step 8, so the
+    // "drop" lands as one unit same as one-drop's togetherness), a late
+    // syncopation (step 10), and a bar-end anticipation (step 14, the same
+    // turnaround convention dub's own bass uses). Refine by ear.
+    bass808Pattern: [0, 5, 8, 10, 14],
+    bass808Octave: 36,
+    bass808Drift: 0.25, // between trap's restless 0.35 and dub's frozen 0.15 - dubstep sections are hypnotic but less rigidly so than one-drop
+    bass808Rest: 0.08, // low - the wobble bass is the dominant, always-present element, not an occasional texture
+    // Root-heavy, more so than trap - real wobble basslines are often
+    // near-monophonic, letting the (unmodeled) filter movement carry
+    // interest instead of pitch movement, so pitch choice is kept simple
+    // on purpose, not an oversight.
+    bass808Choices: [
+      { idx: 0, oct: 0,  w: 0.75 },
+      { idx: 0, oct: -1, w: 0.15 }, // sub-drop, the "the bass just got bigger" moment
+      { idx: 4, oct: 0,  w: 0.10 },
+    ],
+    bass808ChoicesEnd: [
+      { idx: 0, oct: 0,  w: 0.45 },
+      { idx: 0, oct: -1, w: 0.40 }, // phrase-end lean toward the dramatic sub-drop choice
+      { idx: 4, oct: 0,  w: 0.15 },
+    ],
+
+    // High - dubstep's kick and bass are meant to read as one low-end
+    // event landing together, same reasoning as trap's own kickReinforce,
+    // just applied to a richer bass pattern than dub's two-hit one-drop.
+    kickReinforce: 0.65,
+    kickReinforceDrift: 0.15,
+    kickGhost: 0.05, // low - dubstep's low end is about weight and space, not busy kick syncopation
+    kickBeat1Chance: 0.80, // high but not absolute, matching trap's own reasoning for the same near-universal drum-programming convention
+    kickFillBoost: 2.0,
+    // True - dubstep's classic build/drop structure strips right back to
+    // atmosphere (sometimes total silence) before a drop, then reintroduces
+    // kick+bass together as the payoff. Same "kick only exists to
+    // reinforce the low end" logic as trap, opposite of dub's "kick stays"
+    // one-drop reasoning.
+    kickDropsOut: true,
+
+    // Same halftime convention as trap/dub - genuinely shared, not
+    // copy-paste (see dub's own comment on this same field).
+    snarePattern: [8],
+    snareDrift: 0.25,
+    snareRest: 0.12,
+    snareGhost: 0.15, // between trap's busy 0.30 and dub's minimal 0.10 - dubstep snare fills exist but aren't the genre's focus
+    snareFillBoost: 2.0,
+    // No citable "behind the beat" dubstep convention the way dub has real
+    // King Tubby-era evidence - kept at 0 rather than guessing a number,
+    // same "flag it, don't fake it" stance as trap's own snareNudgeMs.
+    snareNudgeMs: 0,
+
+    rollOn: false, // dubstep's identity is the bass, not hat rolls - trap's signature move, not this genre's
+    hatBaseSubsteps: [0, 4], // steady 8th pulse, same sparse/spacious feel as dub's hats - dubstep's attention lives in the bass, not a busy hi-hat
+    rollBaseChance: 0.12, // irrelevant while rollOn is false - kept at trap's own numbers as a harmless placeholder, not a claim they'd fit
+    rollPhraseEndMult: 2.5,
+    rollLengths: [{ n: 6, w: 0.45 }, { n: 8, w: 0.55 }],
+    // No citable grid-wide swing convention for dubstep the way dub has
+    // (dubstep's syncopation lives in the bass pattern and occasional
+    // triplet feel, not a swung 8th-note grid - and triplet feel would need
+    // a different mechanism, subdivision not swing, not attempted here).
+    // 50 is a true no-op, same convention as trap.
+    swingPct: 50,
+    swingGrid: 8,
+
+    scaleMode: 'natural',
+    phrygianChance: 0, // no citation found for dubstep specifically (Phrygian is documented for trap/drill, not this genre) - kept off rather than guessed
+    keyMoveChance: 0.03, // static like dub/dubtechno - no counter-evidence found for dubstep having more movement
+    // Minimal, moody harmony - similar dark-pedal character to dub, no
+    // stronger dubstep-specific citation found so the same template shape
+    // was reused rather than invented from nothing.
+    chordLoopTemplates: [
+      { degs: [0],    w: 0.40 },
+      { degs: [0, 5], w: 0.30 },
+      { degs: [0, 3], w: 0.20 },
+      { degs: [0, 6], w: 0.10 },
+    ],
+    chordLoopBarLen: 2,
+
+    // Sparse synth/vocal-chop hook is a real dubstep convention (unlike
+    // dub, which is an instrumental REMIX of a vocal that's absent here -
+    // dubstep isn't built around remixing a specific vocal the same way,
+    // so a modest synth motif is a defensible stand-in, not the same honest
+    // gap dub has).
+    motifOn: true,
+    // 'arp' (v12): melodic dubstep names "arpeggiated synth motifs" as a
+    // defining palette element - real production guidance specifically
+    // describes it as a quiet background arp running through most of the
+    // track so there's still melody once the bass-drop takes over, unlike
+    // this engine's original restated-every-N-bars arch hook. See
+    // motifArpDegAt() below.
+    motifStyle: 'arp',
+    // v13 correction (see motifArpDegAt()'s own comment for the full
+    // "sounds off" story): quarter notes - sparser than trap's
+    // motifArpDiv:2, matching this genre's own citation ("quiet...
+    // subtle") being a lighter texture than trap's busier one, and
+    // backing off from literal continuous 16ths after live listening
+    // reported the original v12 gating as too fast/machine-gun-like.
+    motifArpDiv: 4,
+    // No citation prefers one arpeggiator mode for dubstep specifically -
+    // same hand-designed weighting as trap, mostly the two repeating fixed
+    // shapes with random as a minority accent, not the constant mode v12 had.
+    motifArpOrders: [
+      { order: 'up',     w: 0.35 },
+      { order: 'updown', w: 0.50 },
+      { order: 'random', w: 0.15 },
+    ],
+    motifCycle: 4,
+    motifNoteRange: [2, 3],
+    motifOctave: 72,
+    motifClip: 0.6,
+
+    skankOn: false, // not a dubstep convention - fields below unused, kept as harmless placeholders same as trap's own inert skank block
+    skankPattern: [2, 6, 10, 14],
+    skankDrift: 0.25,
+    skankRest: 0.15,
+    skankGhost: 0,
+    skankOctave: 67,
+    skankClip: 0.25,
+
+    // No rigorously documented "dubstep breakdown length" convention
+    // (same honest gap as trap's own dropPatience/dropBars) - kept at a
+    // moderate default, not a hard citation.
+    dropPatience: 10,
+    dropBars: 6,
+    // ~4 minute typical dubstep track length - shorter than a house/techno
+    // DJ tool, similar spirit to trap's own streaming-era estimate.
+    songMinutes: 4.0,
+    sectionSeconds: 40, // room for dubstep's characteristic long build into a drop
+    sparse: 1.2,
+  },
+
+  // dnb and dnbHalftime lived here through v10 (mainstream/dancefloor DnB
+  // and Halftime respectively - see git history / this file's own prior
+  // versions for the full presets if you need to recover them). REMOVED in
+  // v11, not lost: a follow-up audit (asked directly - what's on point,
+  // off, or no-data for DnB's drum kit against real DnB/Amen conventions)
+  // found `dnb`'s bass pattern was being derived FROM the documented kick/
+  // breakbeat positions - backwards from this engine's own stated premise
+  // (bass leads, kick reinforces), just quietly, because this file had no
+  // mechanism to represent it any other way. `dnbHalftime` genuinely does
+  // fit this engine's bass-leads architecture (same as trap/dubstep, which
+  // is where it borrows its pocket from) - it moved anyway, by explicit
+  // user choice, so the whole DnB-engine family stays together in its own
+  // proper home rather than splitting across two files by architecture
+  // alone. Both now live in the standalone `DnB Engine dev.js` sibling
+  // project (folder: "DnB Engine"), which gives `dnb` a real kick-leads
+  // mechanism (a `bassLeads` per-preset flag, not available here) instead
+  // of forcing it through this file's bass-leads-only shape, plus two
+  // smaller DnB-specific fixes (a real ride voice instead of a closed hat,
+  // swing scoped to just the ride instead of the whole drum channel) that
+  // only made sense once DnB had its own file to make them in. This
+  // engine's job from here is trap/dub/dubstep - if you're tempted to add
+  // a DnB-lineage genre back in, it belongs in the DnB Engine sibling
+  // project, not here (same reasoning this project's own CLAUDE.md already
+  // gives for why trap/dub/dnb/dubstep left Ship of Theseus in the first
+  // place).
+};
+
+const _preset = { ...(MODE_PRESETS[MODE] || MODE_PRESETS.trap), ...MODE_OVERRIDES };
+
+// ---- grid-wide swing/shuffle (v4) - ported directly from Ship of
+// Theseus's own, already-proven mechanism (same formula, same
+// .swingBy(SWING, SWING_GRID) call), not a new invention. SWING_PCT:50 is
+// a true no-op (SWING=0, withSwing() below - defined near the final
+// assembly, where it's actually used - skips the .swingBy() call
+// entirely rather than calling it with a zero amount), same "0 is a real
+// no-op, not a placeholder" convention used throughout this file. Applied
+// per-channel to the whole stacked pattern on that channel, same as Ship
+// of Theseus - real grid-wide shuffle across every voice on a channel
+// together, not the single-voice-only reach applyNudge()/snareNudgeMs
+// has. The two mechanisms are complementary: snareNudgeMs claims "this
+// one hit sits behind the grid," swingBy claims "every other subdivision
+// across the whole channel does." ----
+const SWING_PCT = _preset.swingPct;
+const SWING_GRID = _preset.swingGrid;
+const SWING = (SWING_PCT - 50) / 50;
+
+// ---- energy/breakdown arrangement walk - reused verbatim from Ship of
+// Theseus. Genuinely genre-agnostic: a slow energy climb, an occasional
+// breakdown triggered more likely at high energy, breakdown LENGTH drawn
+// once at trigger from a bounded range around a researched typical length
+// (never a repeated "keep going?" coin-flip - see that project's CLAUDE.md
+// "Working style" note for why that shape is wrong: unbounded tail, and
+// its single most likely outcome sits at the shortest length, not the
+// average). ----
+const E_START = 30, E_MAX = 100;
+const CLIMB_LO = 0.5, CLIMB_HI = 2.0;
+const DROP_PATIENCE = _preset.dropPatience;
+const DROP_BARS = _preset.dropBars;
+const DROP_PATIENCE_SAFE = Math.max(-35, Math.min(45, DROP_PATIENCE));
+const DROP_LO = 40 + DROP_PATIENCE_SAFE;
+const DROP_HI = Math.max(DROP_LO + 5, Math.min(100, 90 + DROP_PATIENCE_SAFE));
+const DROP_MAX_CHANCE = 0.18;
+const DROP_COOLDOWN = 4;
+const RELEASE_LO = 0.3, RELEASE_HI = 0.6;
+
+const SECS_PER_BAR = 240 / BPM;
+const SONG_MINUTES = _preset.songMinutes;
+const SECTION = Math.max(1, Math.round(_preset.sectionSeconds / (SECS_PER_BAR * BARS_PER_PHRASE)));
+const REST_CAP_MULT = 0.75;
+const SPARSE = _preset.sparse;
+
+function dropPhraseTarget(bars, roll) {
+  const phrases = Math.max(1, bars / BARS_PER_PHRASE);
+  return Math.max(1, Math.round(phrases * (0.75 + roll * 0.5)));
+}
+function avgBarsPerDrop(patience, dropBars) {
+  const pSafe = Math.max(-35, Math.min(45, patience));
+  const pLo = 40 + pSafe, pHi = Math.max(pLo + 5, Math.min(100, 90 + pSafe));
+  let s = 0x9e3779b9;
+  const lcg = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  let e = E_START, cool = 0, drop = false, bar = 0, lastDropBar = -1, dropLen = 0, dropTarget = 0;
+  const gaps = [];
+  for (let n = 0; n < 5000; n++) {
+    e = Math.min(E_MAX, e + CLIMB_LO + lcg() * (CLIMB_HI - CLIMB_LO));
+    let nowDrop = false;
+    if (drop) {
+      nowDrop = dropLen <= dropTarget;
+      if (!nowDrop) cool = DROP_COOLDOWN;
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - pLo) / (pHi - pLo)));
+      if (lcg() < ramp * DROP_MAX_CHANCE) {
+        nowDrop = true;
+        dropTarget = dropPhraseTarget(dropBars, lcg());
+        e = e * (1 - (RELEASE_LO + lcg() * (RELEASE_HI - RELEASE_LO)));
+      }
+    }
+    if (nowDrop && !drop) { if (lastDropBar >= 0) gaps.push(bar - lastDropBar); lastDropBar = bar; }
+    dropLen = nowDrop ? dropLen + 1 : 0;
+    drop = nowDrop;
+    bar += BARS_PER_PHRASE;
+  }
+  return gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : dropBars;
+}
+const SONG_DROPS = SONG_MINUTES > 0
+  ? Math.max(1, Math.round((SONG_MINUTES * 60) / (avgBarsPerDrop(DROP_PATIENCE, DROP_BARS) * SECS_PER_BAR)))
+  : 0;
+
+const _walk = [{ e: E_START, drop: false, cool: 0, song: 0, since: 0, dropLen: 0, dropTarget: 0 }];
+function phrase(i) {
+  return growChain(_walk, i, arr => {
+    const n = arr.length, p = arr[n - 1];
+    let e = Math.min(E_MAX, p.e + CLIMB_LO + rnd(4, n, 0) * (CLIMB_HI - CLIMB_LO));
+    let drop = false, cool = p.cool, song = p.song, since = p.since, dropLen = 0, dropTarget = p.dropTarget;
+    if (p.drop) {
+      dropLen = p.dropLen + 1;
+      drop = dropLen <= p.dropTarget;
+      if (!drop) cool = DROP_COOLDOWN;
+    } else if (cool > 0) {
+      cool -= 1;
+    } else {
+      const ramp = Math.max(0, Math.min(1, (e - DROP_LO) / (DROP_HI - DROP_LO)));
+      if (rnd(5, n, 0) < ramp * DROP_MAX_CHANCE) {
+        drop = true;
+        dropLen = 1;
+        dropTarget = dropPhraseTarget(DROP_BARS, rnd(6, n, 0));
+        e = e * (1 - (RELEASE_LO + rnd(7, n, 0) * (RELEASE_HI - RELEASE_LO)));
+        since += 1;
+        if (SONG_DROPS > 0 && since >= SONG_DROPS) { song += 1; since = 0; e = E_START; }
+      }
+    }
+    return { e, drop, cool, song, since, dropLen, dropTarget };
+  });
+}
+const songAtBar = bar => phrase(Math.floor(bar / BARS_PER_PHRASE)).song;
+const efrac = st => Math.max(0, Math.min(1, (st.e - E_START) / (E_MAX - E_START)));
+
+// ---- key/scale system - reused verbatim from Ship of Theseus, plus
+// scaleFlavorFor() below (genre-agnostic mechanism, per-mode chance). ----
+const KEY_MOVE_CHANCE = _preset.keyMoveChance;
+const KEY_RELATIVE_ODDS = 0.25;
+const MAX_KEY_DRIFT = 2;
+
+const PITCH_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
+const PHRYGIAN_SCALE = [0, 1, 3, 5, 7, 8, 10]; // natural minor with a b2 - the dark-trap/drill flavor
+const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
+const PHRYGIAN_CHANCE = _preset.phrygianChance;
+const _scaleFlavors = {};
+function scaleFlavorFor(song) {
+  if (_scaleFlavors[song] !== undefined) return _scaleFlavors[song];
+  return _scaleFlavors[song] = rnd(47, song, 0) < PHRYGIAN_CHANCE ? PHRYGIAN_SCALE : MINOR_SCALE;
+}
+
+function rootOf(num, mode) {
+  const base = (7 * (num - 1)) % 12;
+  return mode === 'm' ? (base + 9) % 12 : base;
+}
+function parseOpenKey(s) {
+  const m = String(s).trim().toLowerCase().match(/^(\d{1,2})([md])$/);
+  if (!m) return { num: 1, mode: 'm' };
+  return { num: Math.min(12, Math.max(1, +m[1])), mode: m[2] };
+}
+function keyName(k) {
+  return k.num + k.mode + ' (' + PITCH_NAMES[rootOf(k.num, k.mode)] + (k.mode === 'm' ? ' minor)' : ' major)');
+}
+function wheelDist(a, b) {
+  const d = Math.abs(a - b) % 12;
+  return Math.min(d, 12 - d);
+}
+
+const KEY_TYPED = parseOpenKey(OPEN_KEY);
+const NEW_SONG_KEY_DRIFT = 3;
+const _origins = {};
+function keyOriginFor(song) {
+  if (_origins[song]) return _origins[song];
+  if (song === 0) { _origins[0] = KEY_TYPED; return KEY_TYPED; }
+  const off = Math.floor(rnd(24, song, 0) * (NEW_SONG_KEY_DRIFT * 2 + 1)) - NEW_SONG_KEY_DRIFT;
+  const num = ((KEY_TYPED.num - 1 + off + 12) % 12) + 1;
+  const mode = rnd(25, song, 0) < 0.30 ? (KEY_TYPED.mode === 'm' ? 'd' : 'm') : KEY_TYPED.mode;
+  _origins[song] = { num, mode };
+  return _origins[song];
+}
+const KEY_ORIGIN = KEY_TYPED;
+const _keys = [KEY_TYPED];
+function keyAtPhrase(ph) {
+  return growChain(_keys, ph, arr => {
+    const n = arr.length, prev = arr[n - 1];
+    const home = keyOriginFor(phrase(n).song);
+    if (phrase(n).song !== phrase(n - 1).song) return home;
+    let next = prev;
+    if (n > 0 && !phrase(n).drop && phrase(n - 1).drop && rnd(18, n, 0) < KEY_MOVE_CHANCE) {
+      if (rnd(19, n, 0) < KEY_RELATIVE_ODDS) {
+        next = { num: prev.num, mode: prev.mode === 'm' ? 'd' : 'm' };
+      } else {
+        const dir = rnd(20, n, 0) < 0.5 ? -1 : 1;
+        const num = ((prev.num - 1 + dir + 12) % 12) + 1;
+        if (wheelDist(num, home.num) <= MAX_KEY_DRIFT) next = { num, mode: prev.mode };
+      }
+    }
+    return next;
+  });
+}
+function keyAtBar(bar) { return keyAtPhrase(Math.floor(bar / BARS_PER_PHRASE)); }
+function scaleAtBar(bar) {
+  const k = keyAtBar(bar);
+  const minorScale = scaleFlavorFor(songAtBar(bar));
+  return { root: rootOf(k.num, k.mode), steps: k.mode === 'm' ? minorScale : MAJOR_SCALE, key: k };
+}
+
+// ---- chord loop - one chord per bar, one loop template chosen per song.
+// See MODE_PRESETS.trap.chordLoopTemplates above for the full sourcing. ----
+const CHORD_LOOP_TEMPLATES = _preset.chordLoopTemplates;
+const CHORD_LOOP_BAR_LEN = _preset.chordLoopBarLen;
+const _chordLoops = {};
+function chordLoopFor(song) {
+  if (_chordLoops[song]) return _chordLoops[song];
+  return _chordLoops[song] = weightedChoice(48, 0, 0, song, CHORD_LOOP_TEMPLATES).degs;
+}
+function chordDegreeAt(bar) {
+  const loop = chordLoopFor(songAtBar(bar));
+  return loop[Math.floor(bar / CHORD_LOOP_BAR_LEN) % loop.length];
+}
+
+function logKeySchedule(phrases) {
+  const secsPerPhrase = BARS_PER_PHRASE * (240 / BPM);
+  const out = ['key ' + keyName(KEY_ORIGIN) + ' - schedule for the next ' +
+               (phrases * secsPerPhrase / 60).toFixed(0) + ' min:'];
+  let prev = null;
+  for (let p = 0; p < phrases; p++) {
+    const k = keyAtPhrase(p);
+    if (!prev || k.num !== prev.num || k.mode !== prev.mode) {
+      const mins = p * secsPerPhrase / 60;
+      out.push('  ' + mins.toFixed(1) + ' min  ' + keyName(k) +
+               (prev ? '  (' + wheelDist(k.num, KEY_ORIGIN.num) + ' fifths from home)' : '  START'));
+      prev = k;
+    }
+  }
+  if (out.length === 1) out.push('  no key changes in this window - as intended');
+  console.log(out.join('\n'));
+}
+logKeySchedule(300);
+
+function logRiskCaps() {
+  const loPhrases = dropPhraseTarget(DROP_BARS, 0), hiPhrases = dropPhraseTarget(DROP_BARS, 1);
+  const loBars = loPhrases * BARS_PER_PHRASE, hiBars = hiPhrases * BARS_PER_PHRASE;
+  console.log('@ ' + MODE + ' ' + BPM + 'bpm: breakdown runs ' + loBars + '-' + hiBars +
+    ' bars (' + (loBars * SECS_PER_BAR / 60).toFixed(1) + '-' + (hiBars * SECS_PER_BAR / 60).toFixed(1) +
+    ' min, centered on the researched ' + DROP_BARS + ')');
+}
+logRiskCaps();
+
+// ---- per-voice skeleton/drift/rest - reused mechanism from Ship of
+// Theseus, refactored into a standalone function instead of inline
+// closures (that project builds one per voice inside voicePattern(); here
+// it's one shared factory, since this engine only ever needs it for a
+// handful of voices, not a dozen). A voice's pattern is rolled once from
+// `profile` (probability per grid position), then drifts slowly - one
+// position at a time, capped at maxDrift away from the original roll - so
+// a dense voice never turns sparse or vice versa over a long set. Section-
+// level rests use the same per-voice-proportional cap Ship of Theseus's
+// own history required (a flat cap punishes a high restChance hardest -
+// see its CLAUDE.md). ----
+const DRIFT_CHANCE = 0.5, MAX_DRIFT = 3;
+const PROFILE_DRIFT_CHANCE = 0.20, PROFILE_DRIFT_AMOUNT = 0.05, PROFILE_DRIFT_BAND = 0.25;
+
+function makeSkeleton(vi, profile, drift, restBase, steps) {
+  const len = profile.length;
+  const maxDrift = Math.max(1, Math.min(MAX_DRIFT, Math.floor(len / 3)));
+  const orig = profile.map((p, s) => rnd(0, vi * 997 + s, 0) < p);
+  if (!orig.some(Boolean)) {
+    const peak = Math.max.apply(null, profile);
+    const strong = [];
+    profile.forEach((p, s) => { if (p >= peak / 2) strong.push(s); });
+    orig[strong[Math.floor(rnd(22, vi, 0) * strong.length) % strong.length]] = true;
+  }
+
+  const _profiles = [profile.slice()];
+  function profileAt(sec) {
+    return growChain(_profiles, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(26, vi, n) < PROFILE_DRIFT_CHANCE * drift) {
+        const step = Math.floor(rnd(27, vi, n) * len) % len;
+        const dir = rnd(28, vi * 997 + step, n) < 0.5 ? -1 : 1;
+        const base = profile[step];
+        const lo = Math.max(0, base - PROFILE_DRIFT_BAND);
+        const hi = Math.min(1, base + PROFILE_DRIFT_BAND);
+        const nudged = Math.max(lo, Math.min(hi, prev[step] + dir * PROFILE_DRIFT_AMOUNT));
+        if (nudged !== prev[step]) { next = prev.slice(); next[step] = nudged; }
+      }
+      return next;
+    });
+  }
+
+  const _chains = [orig];
+  function skelAt(sec) {
+    return growChain(_chains, sec, arr => {
+      const n = arr.length, prev = arr[n - 1];
+      let next = prev;
+      if (rnd(8, vi, n) < DRIFT_CHANCE * drift) {
+        const step = Math.floor(rnd(9, vi, n) * len) % len;
+        const val = rnd(10, vi * 997 + step, n) < profileAt(n)[step];
+        if (val !== prev[step]) {
+          const cand = prev.slice(); cand[step] = val;
+          let d = 0;
+          for (let i = 0; i < len; i++) if (cand[i] !== orig[i]) d++;
+          if (d <= maxDrift) next = cand;
+        }
+      }
+      return next;
+    });
+  }
+
+  const restChance = Math.max(0, Math.min(0.75, restBase * SPARSE));
+  const maxRestStreak = Math.max(1, Math.ceil(REST_CAP_MULT / (1 - restChance)));
+  const _restsChain = [];
+  function restsAtSection(sec) {
+    return growChain(_restsChain, sec, arr => {
+      const n = arr.length;
+      let streak = 0;
+      for (let i = n - 1; i >= 0 && arr[i]; i--) streak++;
+      const forced = streak >= maxRestStreak;
+      return !forced && rnd(23, vi, n) < restChance;
+    });
+  }
+  const secOf = bar => Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const idxAt = (step, bar) => (bar * steps + step) % len;
+  return {
+    hitAt: (step, bar) => skelAt(secOf(bar))[idxAt(step, bar)],
+    restsAt: bar => restChance > 0 && restsAtSection(secOf(bar)),
+    isPickup: (step, bar) => skelAt(secOf(bar))[(idxAt(step, bar) + 1) % len],
+    secOf, idxAt,
+  };
+}
+
+const HIT_HI = 0.97, HIT_LO = 0.02;
+function stepProfile(hits, steps) {
+  return Array.from({ length: steps }, (_, i) => hits.indexOf(i) >= 0 ? HIT_HI : HIT_LO);
+}
+
+// ---- ghost/wander - reused formula from Ship of Theseus's voicePattern
+// (same WANDER_LO/HI, MAX_GHOST values - proven, genre-agnostic). Adds
+// occasional extra hits between skeleton hits, scaled by the current energy
+// and boosted right before a skeleton hit (a "pickup"). ----
+const MAX_GHOST = 0.35, WANDER_LO = 0.15, WANDER_HI = 0.85;
+const PICKUP_BIAS = 1.70, PICKUP_ELSE = 0.72;
+function ghostChance(ghostAmt, st, isPickup) {
+  const w = WANDER_LO + efrac(st) * (WANDER_HI - WANDER_LO);
+  return w * MAX_GHOST * ghostAmt * (isPickup ? PICKUP_BIAS : PICKUP_ELSE);
+}
+
+// -- phrase-ending operations - shared trigger so each voice below boosts
+// its own existing ghost/variation mechanism the same way, rather than
+// each voice inventing its own phrase-end logic. ----
+function isPhraseEndBar(bar) { return bar % BARS_PER_PHRASE === BARS_PER_PHRASE - 1; }
+function phraseEndBoost(bar, boost) { return isPhraseEndBar(bar) ? boost : 1; }
+
+// -- micro-timing - kept only as a constant-shift utility (useful for
+// legitimately different purposes, e.g. sub-frame-accurate alignment
+// tweaks), not applied to any voice by default at 0. See
+// MODE_PRESETS.trap.snareNudgeMs above for why a fixed per-hit offset is
+// the wrong shape for "humanization" in the first place. ----
+function nudgeSec(ms) { return (ms / 1000) / SECS_PER_BAR; }
+function applyNudge(pat, ms) { return !ms ? pat : pat.late(nudgeSec(ms)); }
+
+// ============================================================
+//  -- 808 (channel 2) - THE GENRE'S ACTUAL BACKBONE --
+// ============================================================
+const BASS808_PATTERN = _preset.bass808Pattern;
+const BASS808_HITS = Array.from({ length: STEPS }, (_, i) => BASS808_PATTERN.indexOf(i) >= 0);
+const BASS808_PROFILE = stepProfile(BASS808_PATTERN, STEPS);
+const BASS808_OCTAVE = _preset.bass808Octave;
+const BASS808_DRIFT = _preset.bass808Drift;
+const BASS808_REST = _preset.bass808Rest;
+const BASS808_CHOICES = _preset.bass808Choices;
+const BASS808_CHOICES_END = _preset.bass808ChoicesEnd;
+
+const bass808Skel = makeSkeleton(0, BASS808_PROFILE, BASS808_DRIFT, BASS808_REST, STEPS);
+
+function bass808Pattern() {
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (st.drop) return false; // the 808 IS the beat here - it drops with everything else
+    if (bass808Skel.restsAt(bar)) return false;
+    return bass808Skel.hitAt(step, bar);
+  }).segment(STEPS);
+
+  const noteSig = sig(t => {
+    const [step, bar] = stepBar(t);
+    const sc = scaleAtBar(bar);
+    const choices = isPhraseEndBar(bar) ? BASS808_CHOICES_END : BASS808_CHOICES;
+    const c = weightedChoice(21, 0, step, bass808Skel.secOf(bar), choices);
+    // chordDeg shifts which scale degree idx:0 resolves to - idx:0 always
+    // means "this bar's local chord root," not always the key's own root.
+    // Reduces to the plain key-root formula automatically when the song's
+    // chord loop is a single-chord pedal (chordDeg=0 every bar).
+    const chordDeg = chordDegreeAt(bar);
+    return BASS808_OCTAVE + sc.root + sc.steps[(c.idx + chordDeg) % 7] + 12 * c.oct;
+  }).segment(STEPS);
+
+  const velSig = sig(t => {
+    const [step, bar] = stepBar(t);
+    return 0.75 + rnd(2, step, bar) * 0.20;
+  }).segment(STEPS);
+
+  // Legato: each 808 note rings until just before the NEXT scheduled hit,
+  // not a fixed short clip - this is what gives an 808 its "boom that rings
+  // under everything" character instead of sounding like a plucked bass
+  // note. `clip` here is in units of 16th-steps (same convention Ship of
+  // Theseus's PAD_CLIP uses, e.g. clip:15 meaning "almost a full 16-step
+  // bar") - distance-to-next-hit is computed from this SAME skeleton, so
+  // it stays correct automatically as the skeleton drifts.
+  const clipSig = sig(t => {
+    const [step, bar] = stepBar(t);
+    let dist = 1;
+    for (let k = 1; k <= STEPS; k++) {
+      const s2 = (step + k) % STEPS, b2 = bar + Math.floor((step + k) / STEPS);
+      if (bass808Skel.hitAt(s2, b2)) { dist = k; break; }
+    }
+    return dist * 0.95;
+  }).segment(STEPS);
+
+  return note(noteSig).struct(gate).velocity(velSig).clip(clipSig);
+}
+
+// ============================================================
+//  -- kick (channel 1) - FOLLOWS the 808, does not lead it --
+// ============================================================
+const KICK_REINFORCE = _preset.kickReinforce;
+const KICK_REINFORCE_DRIFT = _preset.kickReinforceDrift;
+const KICK_GHOST = _preset.kickGhost;
+const KICK_BEAT1_CHANCE = _preset.kickBeat1Chance;
+const KICK_FILL_BOOST = _preset.kickFillBoost;
+// true (trap): kick only exists to reinforce the 808, so it drops with it.
+// false (dub): kick+snare are one unit that survives a breakdown even when
+// the bass itself thins out - see MODE_PRESETS.dub's own comment for the
+// sourcing. Also gates snarePattern() below, since one-drop treats kick
+// and snare as the same rhythmic event, not two independent voices.
+const KICK_DROPS_OUT = _preset.kickDropsOut;
+const _kickBeat1 = {};
+function kickHasBeat1(song) {
+  if (_kickBeat1[song] !== undefined) return _kickBeat1[song];
+  return _kickBeat1[song] = rnd(45, song, 0) < KICK_BEAT1_CHANCE;
+}
+const KICK_REINFORCE_PROFILE = BASS808_HITS.map(isHit => isHit ? KICK_REINFORCE : HIT_LO);
+const kickSkel = makeSkeleton(1, KICK_REINFORCE_PROFILE, KICK_REINFORCE_DRIFT, 0, STEPS);
+
+function kickPattern() {
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (KICK_DROPS_OUT && st.drop) return false;
+    if (step === 0 && kickHasBeat1(songAtBar(bar))) return true;
+    if (kickSkel.hitAt(step, bar)) return true;
+    const ghostChance2 = KICK_GHOST * phraseEndBoost(bar, KICK_FILL_BOOST) * efrac(st);
+    if (!BASS808_HITS[step] && rnd(1, step, bar) < ghostChance2) return true;
+    return false;
+  }).segment(STEPS);
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    return (step === 0 || kickSkel.hitAt(step, bar))
+      ? 0.85 + rnd(2, step, bar) * 0.10
+      : 0.55 + rnd(3, step, bar) * 0.15;
+  }).segment(STEPS);
+  return note(36).struct(gate).velocity(vel); // GM kick
+}
+
+// ============================================================
+//  -- snare/clap (channel 1) --
+// ============================================================
+const SNARE_PATTERN = _preset.snarePattern;
+const SNARE_PROFILE = stepProfile(SNARE_PATTERN, STEPS);
+const SNARE_DRIFT = _preset.snareDrift;
+const SNARE_REST = _preset.snareRest;
+const SNARE_GHOST = _preset.snareGhost;
+const SNARE_FILL_BOOST = _preset.snareFillBoost;
+const SNARE_NUDGE_MS = _preset.snareNudgeMs;
+const snareSkel = makeSkeleton(2, SNARE_PROFILE, SNARE_DRIFT, SNARE_REST, STEPS);
+
+function snarePattern() {
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (KICK_DROPS_OUT && st.drop) return false; // one-drop's kick+snare are one unit - see KICK_DROPS_OUT above
+    if (snareSkel.restsAt(bar)) return false;
+    if (snareSkel.hitAt(step, bar)) return true;
+    // Beat 1 is forbidden, not just atypical, for a true one-drop mode
+    // (KICK_BEAT1_CHANCE===0 - see that flag's own comment above): kick and
+    // snare are documented as the same rhythmic unit there, so a ghost note
+    // sneaking a snare onto step 0 would violate the genre's defining
+    // absence exactly as much as a stray kick would, even at low
+    // probability - a generative engine running for a real 25-minute set
+    // will eventually roll any nonzero-probability step, so this has to be
+    // a hard exclusion, not a smaller number.
+    if (step === 0 && KICK_BEAT1_CHANCE === 0) return false;
+    const ghostAmt = SNARE_GHOST * phraseEndBoost(bar, SNARE_FILL_BOOST);
+    return rnd(1, step, bar) < ghostChance(ghostAmt, st, snareSkel.isPickup(step, bar));
+  }).segment(STEPS);
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    return snareSkel.hitAt(step, bar)
+      ? 0.82 + rnd(2, step, bar) * 0.13
+      : 0.35 + rnd(3, step, bar) * 0.20;
+  }).segment(STEPS);
+  return applyNudge(note(39).struct(gate).velocity(vel), SNARE_NUDGE_MS); // GM clap
+}
+
+// ============================================================
+//  -- hats (channel 1) - probabilistic roll (rollOn only) --
+// ============================================================
+// Needs a finer grid than the rest of the engine (HAT_STEPS=32, 8 sub-
+// steps/beat) purely to have room for more than 16 hits/bar during a roll -
+// hats are the only voice on this grid. Roll length is drawn ONCE per
+// triggered roll from a small bounded set - never a repeated "one more
+// hit?" coin-flip. That shape (re-rolled with no memory) has an unbounded
+// tail AND its single most likely outcome sits at the shortest length, not
+// the average - the exact bug class Ship of Theseus's own history already
+// hit twice (breakdown length, section-rest chance; see its CLAUDE.md).
+//
+// CORRECTED: a roll can now span MULTIPLE beats, not just one. It didn't
+// before - rollSubsteps(n) only special-cased n===6 and fell back to a
+// fixed 8-element array for every other n, so dnbHalftime's (then still
+// named `dnb`) rollLengths (8/12/16, weighted 35/35/30) all silently
+// produced the exact same 8-substep burst. 65% of its roll-length draws
+// were doing nothing - a config value that
+// looked meaningful but wasn't, the same class of bug as a dead VOICES
+// field. Fixed at the mechanism level: rollScheduleFor(bar) computes a
+// bar's whole roll layout once (scanning beats left to right, skipping
+// past however many beats a triggered roll actually consumes), so a
+// triggered n=16 genuinely occupies 2 full beats end to end. Each beat's
+// own trigger is only evaluated if no earlier roll in the same bar already
+// claims it, and ROLL_LENGTHS is filtered+reweighted to whatever length
+// actually fits in the beats remaining before drawing - so a roll can
+// never be cut off mid-way by hitting the end of the bar, it just can't
+// offer to start a 16-long roll with only 8 substeps of bar left. Trap's
+// own rollLengths (max 8) always fit within any remaining beat count, so
+// this changes nothing about trap's behavior - verified by an isolated
+// equivalence check before/after (see the note on this fix's own
+// verification for the numbers).
+const ROLL_ON = _preset.rollOn;
+const HAT_BASE_SUBSTEPS = _preset.hatBaseSubsteps;
+const ROLL_BASE_CHANCE = _preset.rollBaseChance;
+const ROLL_PHRASE_END_MULT = _preset.rollPhraseEndMult;
+const ROLL_LENGTHS = _preset.rollLengths;
+
+function rollSubsteps(n) {
+  if (n === 6) return [0, 1, 2, 4, 5, 6]; // fills in 2 of the 4 "and" slots within ONE beat - a triplet-like feel, stays single-beat-scoped on purpose
+  return Array.from({ length: n }, (_, i) => i); // n>=7: full-density burst across n consecutive sub-steps - may span multiple beats
+}
+function rollAt(bar, beatIdx, maxLen) {
+  if (!ROLL_ON) return null;
+  const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+  // only the second half of the phrase's last bar counts as "near the end" -
+  // a roll starting at beat 1 of the last bar would run too long before the
+  // boundary to read as a fill.
+  const boost = beatIdx >= 2 ? phraseEndBoost(bar, ROLL_PHRASE_END_MULT) : 1;
+  const chance = ROLL_BASE_CHANCE * boost * (0.5 + efrac(st) * 0.5);
+  if (rnd(40, bar, beatIdx) >= chance) return null;
+  const valid = ROLL_LENGTHS.filter(o => o.n <= maxLen);
+  if (!valid.length) return null; // no length fits what's left of the bar - no roll here
+  const totalW = valid.reduce((a, o) => a + o.w, 0);
+  const roll = rnd(41, bar, beatIdx) * totalW;
+  let acc = 0;
+  for (const opt of valid) { acc += opt.w; if (roll < acc) return opt.n; }
+  return valid[valid.length - 1].n;
+}
+
+// One roll schedule per bar, computed once and memoized: scan beats left to
+// right, and only let a beat trigger its OWN roll if no earlier roll in
+// this bar already claims it - otherwise a 16-long roll starting at beat 0
+// could get contradicted by beat 1 independently deciding to start its own.
+const _rollSchedules = {};
+function rollScheduleFor(bar) {
+  if (_rollSchedules[bar]) return _rollSchedules[bar];
+  const windows = [];
+  let beatIdx = 0;
+  while (beatIdx < 4) {
+    const maxLen = (4 - beatIdx) * 8;
+    const n = rollAt(bar, beatIdx, maxLen);
+    if (n) {
+      windows.push({ start: beatIdx * 8, n });
+      beatIdx += Math.ceil(n / 8);
+    } else {
+      beatIdx += 1;
+    }
+  }
+  return _rollSchedules[bar] = windows;
+}
+function rollWindowAt(bar, sub) {
+  for (const w of rollScheduleFor(bar)) if (sub >= w.start && sub < w.start + w.n) return w;
+  return null;
+}
+
+function hatPattern() {
+  // Deliberately NO `if (st.drop) return false` here - hats (and the
+  // melody, below) are what stay standing when the kick/808/snare strip out
+  // for a breakdown, the classic trap "beat switch"/intro texture.
+  const gate = sig(t => {
+    const [sub, bar] = stepBar(t, HAT_STEPS);
+    const w = rollWindowAt(bar, sub);
+    if (w) return rollSubsteps(w.n).indexOf(sub - w.start) >= 0;
+    return HAT_BASE_SUBSTEPS.indexOf(sub % 8) >= 0;
+  }).segment(HAT_STEPS);
+
+  const vel = sig(t => {
+    const [sub, bar] = stepBar(t, HAT_STEPS);
+    const w = rollWindowAt(bar, sub);
+    if (w) {
+      // crescendo across the roll - it should feel like it's building INTO
+      // the next beat, not just uniformly louder
+      const active = rollSubsteps(w.n);
+      const pos = active.indexOf(sub - w.start);
+      const frac = pos / Math.max(1, active.length - 1);
+      return 0.45 + frac * 0.50 + rnd(2, sub, bar) * 0.05;
+    }
+    const inBeat = sub % 8;
+    const accent = inBeat === 0 ? 1.0 : 0.7; // downbeat of each beat slightly louder
+    return (0.55 + rnd(2, sub, bar) * 0.15) * accent;
+  }).segment(HAT_STEPS);
+
+  return note(42).struct(gate).velocity(vel); // GM closed hat
+}
+
+// ============================================================
+//  -- melody (channel 3) - sparse, minimal lead (motifOn only) --
+// ============================================================
+// Reused generator (arch contour, one climax past the midpoint, first/last
+// note a chord tone, mostly stepwise) from Ship of Theseus - genuinely
+// genre-agnostic melody shape.
+const MOTIF_ON = _preset.motifOn;
+const MOTIF_STYLE = _preset.motifStyle; // 'arch' (below) or 'arp' (motifArpDegAt(), v12)
+const MOTIF_CHORD = [0, 2, 4];
+const MOTIF_POS = [0, 4, 6, 8, 12, 14];
+const MOTIF_STRONG = [0, 8];
+const MOTIF_N_LO = _preset.motifNoteRange[0], MOTIF_N_HI = _preset.motifNoteRange[1];
+const MOTIF_CYCLE = _preset.motifCycle;
+const MOTIF_OCTAVE = _preset.motifOctave;
+const MOTIF_CLIP = _preset.motifClip;
+
+function motifSpread(total, moves, id, salt) {
+  const out = new Array(moves).fill(1);
+  let extra = total - moves;
+  for (let k = 0; extra > 0 && k < 50; k++) {
+    const i = Math.floor(rnd(40 + salt, id * 7 + k, 0) * moves);
+    if (out[i] < 3) { out[i]++; extra--; }
+  }
+  return out;
+}
+function motifChordTone(target, lo, hi) {
+  let best = null, bd = 99;
+  for (let o = -2; o <= 3; o++) for (const c of MOTIF_CHORD) {
+    const v = c + o * 7;
+    if (v < lo || v > hi) continue;
+    const d = Math.abs(v - target);
+    if (d < bd) { bd = d; best = v; }
+  }
+  return best === null ? target : best;
+}
+const _motifs = {};
+function motifFor(id) {
+  if (_motifs[id]) return _motifs[id];
+  const n = MOTIF_N_LO + Math.floor(rnd(30, id, 0) * (MOTIF_N_HI - MOTIF_N_LO + 1));
+  const peakLo = Math.floor((n - 1) / 2) + 1;
+  const peakHi = n - 2;
+  const peakIdx = peakHi >= peakLo
+    ? peakLo + Math.floor(rnd(31, id, 0) * (peakHi - peakLo + 1))
+    : Math.max(1, peakHi);
+  const riseMoves = peakIdx, fallMoves = n - 1 - peakIdx;
+  const start = MOTIF_CHORD[Math.floor(rnd(32, id, 0) * MOTIF_CHORD.length)];
+  const rise = riseMoves + Math.floor(rnd(33, id, 0) * 3);
+  const peak = start + rise;
+  const endTarget = peak - (fallMoves + Math.floor(rnd(34, id, 0) * 3));
+  const end = fallMoves > 0 ? motifChordTone(endTarget, start - 4, peak - 1) : peak;
+
+  const degs = [start];
+  motifSpread(rise, riseMoves, id, 0).forEach(m => degs.push(degs[degs.length - 1] + m));
+  if (fallMoves > 0) {
+    motifSpread(Math.max(peak - end, fallMoves), fallMoves, id, 5)
+      .forEach(m => degs.push(degs[degs.length - 1] - m));
+    degs[degs.length - 1] = end;
+  }
+  const pool = MOTIF_POS.slice(1), chosen = [0];
+  for (let i = 0; i < n - 1; i++) {
+    let p = pool[Math.floor(rnd(35, id, i) * pool.length)], guard = 0;
+    while (chosen.indexOf(p) >= 0 && guard++ < 12) p = pool[Math.floor(rnd(36, id, i * 13 + guard) * pool.length)];
+    if (chosen.indexOf(p) < 0) chosen.push(p);
+  }
+  chosen.sort((a, b) => a - b);
+  while (chosen.length < degs.length) degs.pop();
+  if (peakIdx < chosen.length) {
+    let best = chosen[peakIdx], bd = 99;
+    for (const stp of MOTIF_STRONG) {
+      if (chosen.indexOf(stp) >= 0 && stp !== chosen[peakIdx]) continue;
+      const prev = peakIdx > 0 ? chosen[peakIdx - 1] : -1;
+      const nxt = peakIdx + 1 < chosen.length ? chosen[peakIdx + 1] : 99;
+      const d = Math.abs(stp - chosen[peakIdx]);
+      if (stp > prev && stp < nxt && d < bd) { bd = d; best = stp; }
+    }
+    chosen[peakIdx] = best;
+  }
+  let d2 = degs.slice(0, chosen.length);
+  const top = Math.max.apply(null, d2);
+  if (top > 6) { const sh = top - 6; d2 = d2.map(x => x - sh); }
+  const bot = Math.min.apply(null, d2);
+  if (bot < 0) d2 = d2.map(x => x - bot);
+  _motifs[id] = { steps: chosen, degs: d2 };
+  return _motifs[id];
+}
+// -- arpeggio contour (motifStyle:'arp' only, v12; corrected v13) - reuses
+// the SAME MOTIF_CHORD triad and the SAME chordDeg/scale-root resolution
+// motifPattern() below already shares with bass808Pattern() via
+// chordDegreeAt() - that root-sync predates this change and is unaffected
+// by this correction.
+//
+// v13 CORRECTION, prompted by an actual listening report ("too fast",
+// "randomly just always firing... not like a musical pattern", "identical
+// for both [trap and dubstep]") - per this file's own Working Style
+// section, that trumps the v12 design reasoning it's replacing:
+// - v12 gated every single 16th step, forever, with the tone order fully
+//   reshuffled every 3 notes. Constant reshuffling means no repeating
+//   shape ever survives long enough for the ear to recognize it as a
+//   phrase - genuinely a different failure than "too much randomness,"
+//   more like "no pattern at all," which is exactly what got reported.
+// - motifArpDiv (new field) now gates the arp at a coarser, per-genre rate
+//   instead of literal continuous 16ths - trap denser (motifArpDiv:2, 8th
+//   notes) than dubstep (motifArpDiv:4, quarter notes), matching the
+//   actual gap already in the two genres' own citations (trap's is cited
+//   at a busy "1/16th note" rate; dubstep's is cited as "quiet... subtle,"
+//   a sparser texture, not literally as dense as trap's). Real 16th-note
+//   continuous gating was tried and reported too fast for both, so this
+//   backs off from the literal citation while keeping the two genres'
+//   RELATIVE density gap that the sourcing does support.
+// - Contour is no longer fixed to one style: motifArpOrders (new field, a
+//   weighted table) picks 'up', 'updown', or 'random' ONCE PER SECTION -
+//   the same "draw once, hold it stable, change only at a section/song
+//   boundary" shape this engine already uses for bass808Skel's drift and
+//   chordLoopFor's chord progression, not a new kind of mechanism. 'up'
+//   and 'updown' are deterministic, genuinely repeating shapes (what was
+//   actually missing before); 'random' stays available as an occasional
+//   accent via the same reshuffle-per-pass logic v12 had, kept because a
+//   real arpeggiator's random mode is cited too, just not as the ONLY mode
+//   running nonstop.
+const MOTIF_ARP_DIV = _preset.motifArpDiv;
+const MOTIF_ARP_ORDERS = _preset.motifArpOrders;
+function arpShuffleFor(cycleId) {
+  const order = MOTIF_CHORD.map((_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd(49, cycleId, i) * (i + 1));
+    const tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+  }
+  return order;
+}
+// 'up': 0,1,2 (root-3rd-5th, ascending). 'updown': 0,1,2,1 (ascends then
+// descends through the inner tone before repeating) - both fixed, so they
+// actually repeat as a recognizable riff instead of reshuffling every pass.
+function arpFixedSeq(order) {
+  const up = MOTIF_CHORD.map((_, i) => i);
+  return order === 'up' ? up : up.concat(up.slice(1, -1).reverse());
+}
+const _arpOrderAtSec = {};
+function arpOrderForSection(sec, song) {
+  const key = song + ':' + sec;
+  if (_arpOrderAtSec[key] !== undefined) return _arpOrderAtSec[key];
+  return _arpOrderAtSec[key] = weightedChoice(51, 0, 0, song * 997 + sec, MOTIF_ARP_ORDERS).order;
+}
+function motifArpDegAt(step, bar) {
+  const tick = Math.floor((bar * STEPS + step) / MOTIF_ARP_DIV);
+  const sec = Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const order = arpOrderForSection(sec, songAtBar(bar));
+  const n = MOTIF_CHORD.length;
+  if (order === 'random') return MOTIF_CHORD[arpShuffleFor(Math.floor(tick / n))[tick % n]];
+  const seq = arpFixedSeq(order);
+  return MOTIF_CHORD[seq[tick % seq.length]];
+}
+
+function motifNoteAt(step, bar) {
+  if (!MOTIF_ON) return null;
+  if (MOTIF_STYLE === 'arp') {
+    const absStep = bar * STEPS + step;
+    if (absStep % MOTIF_ARP_DIV !== 0) return null; // rest between arp notes at the slower rate
+    return motifArpDegAt(step, bar);
+  }
+  const inCycle = ((bar % MOTIF_CYCLE) + MOTIF_CYCLE) % MOTIF_CYCLE;
+  if (inCycle > 1) return null; // silent bars between statements
+  const sec = Math.floor(bar / (BARS_PER_PHRASE * SECTION));
+  const m = motifFor(songAtBar(bar) * 977 + sec);
+  const pos = inCycle * STEPS + step;
+  const i = m.steps.indexOf(pos);
+  if (i < 0) return null;
+  const statement = Math.floor(bar / MOTIF_CYCLE);
+  let deg = m.degs[i];
+  if (statement % 2 === 1 && i === m.degs.length - 1) deg = motifChordTone(deg - 2, 0, 6);
+  return deg;
+}
+
+function motifPattern() {
+  const gate = sig(t => {
+    const [step, bar] = stepBar(t);
+    return motifNoteAt(step, bar) !== null;
+  }).segment(STEPS);
+  const noteSig = sig(t => {
+    const [step, bar] = stepBar(t);
+    const sc = scaleAtBar(bar);
+    const noteDeg = motifNoteAt(step, bar);
+    const d = noteDeg === null ? 0 : noteDeg;
+    const o = Math.floor(d / 7), ix = ((d % 7) + 7) % 7;
+    // same chord-loop offset as the 808 (see bass808Pattern) - melody and
+    // bass should agree on which scale degree is the current local root.
+    const chordDeg = chordDegreeAt(bar);
+    return MOTIF_OCTAVE + sc.root + sc.steps[(ix + chordDeg) % 7] + 12 * o;
+  }).segment(STEPS);
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    return 0.60 + rnd(2, step, bar) * 0.20;
+  }).segment(STEPS);
+  return note(noteSig).struct(gate).velocity(vel).clip(MOTIF_CLIP);
+}
+
+// ============================================================
+//  -- skank (channel 4, skankOn only) - off-beat muted chord chops --
+// ============================================================
+// The reggae/dub guitar's defining move - short, muted chord hits on the
+// off-beat "ands" only, a genuinely different technique from a sustained
+// chord voice, not a gentler version of one. Directly reused mechanism
+// shape from Ship of Theseus's own (now-retired) skank/stab voices: one
+// layer per chord tone (root/3rd/5th), same gate/velocity driving all
+// three, chordDegreeAt() shifting which scale degree "root" resolves to
+// so skank agrees with the 808/melody about the current local chord (same
+// convention bass808Pattern() and motifPattern() already use).
+const SKANK_ON = _preset.skankOn;
+const SKANK_PATTERN = _preset.skankPattern;
+const SKANK_PROFILE = stepProfile(SKANK_PATTERN, STEPS);
+const SKANK_DRIFT = _preset.skankDrift;
+const SKANK_REST = _preset.skankRest;
+const SKANK_OCTAVE = _preset.skankOctave;
+const SKANK_CLIP = _preset.skankClip;
+const SKANK_GHOST = _preset.skankGhost;
+const SKANK_CHORD_TONES = [0, 2, 4]; // plain triad - root/3rd/5th
+const SKANK_VI = 3; // voice index for this voice's own rnd()/makeSkeleton() draws - keeps them independent of kick/snare/hat/808/motif's
+const skankSkel = makeSkeleton(SKANK_VI, SKANK_PROFILE, SKANK_DRIFT, SKANK_REST, STEPS);
+
+function skankPattern() {
+  // Deliberately NO st.drop check - skank should be one of the things
+  // still standing when kick/808/snare cut out for a breakdown, the same
+  // "survives a drop" reasoning hats already use, and the same reasoning
+  // Ship of Theseus's own retired skank voice had (dropsOut: false there).
+  const gate = sig(t => {
+    if (!SKANK_ON) return false;
+    const [step, bar] = stepBar(t);
+    const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+    if (skankSkel.restsAt(bar)) return false;
+    if (skankSkel.hitAt(step, bar)) return true;
+    return rnd(1, SKANK_VI * 997 + step, bar) < ghostChance(SKANK_GHOST, st, skankSkel.isPickup(step, bar));
+  }).segment(STEPS);
+  const vel = sig(t => {
+    const [step, bar] = stepBar(t);
+    return skankSkel.hitAt(step, bar)
+      ? 0.55 + rnd(2, SKANK_VI * 997 + step, bar) * 0.20
+      : 0.30 + rnd(3, SKANK_VI * 997 + step, bar) * 0.15;
+  }).segment(STEPS);
+  const layers = SKANK_CHORD_TONES.map(idx => {
+    const noteSig = sig(t => {
+      const bar = Math.floor(t);
+      const sc = scaleAtBar(bar);
+      const chordDeg = chordDegreeAt(bar);
+      return SKANK_OCTAVE + sc.root + sc.steps[(idx + chordDeg) % 7];
+    }).segment(STEPS);
+    return note(noteSig).struct(gate).velocity(vel).clip(SKANK_CLIP);
+  });
+  return stack.apply(null, layers);
+}
+
+// ============================================================
+//  -- final assembly --
+// ============================================================
+// Single mode active at a time, no per-mode kit membership needed - every
+// voice is always in the stack (gated by the arrangement logic above
+// instead). motifPattern()/skankPattern() are only actually gated by
+// MOTIF_ON/SKANK_ON internally, so it's safe to always include them here
+// too.
+const withSwing = p => SWING > 0 ? p.swingBy(SWING, SWING_GRID) : p;
+stack(
+  withSwing(stack(kickPattern(), snarePattern(), hatPattern())).midichan(drumChan),
+  withSwing(bass808Pattern()).midichan(bass808Chan),
+  withSwing(motifPattern()).midichan(leadChan),
+  withSwing(skankPattern()).midichan(skankChan)
+).midi(midi)
