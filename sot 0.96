@@ -1010,7 +1010,7 @@ const dubRest = [
   [SEND.B.bass,       pure(0), 1],
   [SEND.B.stab,       fxEvolve(0.30, 0.55, 122, 45), 8],  // stab into the short reverb
 ];
-const aToBSigDub = fxEvolve(0.35, 0.65, 0, 29);   // middle range - short-reverb-on-delay, less wash than dub
+const aToBSigDub = fxEvolve(0.35, 0.75, 0, 29);   // middle range - short-reverb-on-delay, less wash than dub
 
 // v96 - per-mode FX: [cc, signal, steps per cycle]. Only listed CCs are sent,
 // so every other knob stays where you set it. A mode with no entry sends nothing.
@@ -1037,7 +1037,68 @@ const FX_MODES = {
     // [REPLIKA.fltCutoff, perlin.slow(53).range(0.00, 0.22), 8], // off - written for a pitch-shift mix, 0-0.22 shuts Flt Cutoff
   ],
 };
-const FX_ACTIVE = FX_MODES[MODE] || [];
+
+// v96 - every mode sets every CC, so a live mode switch never keeps the last genre's values.
+// Spec: number = static, [lo, hi] = breathe + evolve per song/SEED, { hold: [lo, hi] } = one value per song.
+// FX_BASE applies to all modes, FX_GENRE overrides per mode, FX_MODES (hand-built signals above) wins over both.
+// All ranges are educated guesses unless a comment says otherwise - confirm by ear.
+const FX_BASE = {
+  [REPLIKA.feedback]: [0.25, 0.45], [REPLIKA.mix]: 1, [REPLIKA.sat]: [0.10, 0.25], [REPLIKA.wowFlutter]: [0.05, 0.15],
+  [REPLIKA.fltStereo]: [0.20, 0.45], [REPLIKA.fltRate]: [0.15, 0.30], [REPLIKA.fltMode]: FLT_MODE.lp,
+  [REPLIKA.timeA]: 0.27, [REPLIKA.timeB]: 0.48,       // your current knob settings (34 / 61)
+  [REPLIKA.loCut]: [0.20, 0.35], [REPLIKA.hiCut]: [0.45, 0.70], [REPLIKA.fltReso]: [0.05, 0.20],
+  [REPLIKA.fbkLoop]: [0.35, 0.55], [REPLIKA.fbkBalance]: [0.40, 0.60], [REPLIKA.fltCutoff]: [0.55, 0.80], [REPLIKA.fltDepth]: [0.05, 0.20],
+  [RAUM.feedback]: [0.10, 0.20], [RAUM.predelay]: [0.20, 0.35], [RAUM.mix]: 1, [RAUM.size]: [0.35, 0.55],
+  [RAUM.lowCut]: [0.35, 0.50], [RAUM.highCut]: [0.45, 0.65], [RAUM.reverb]: [0.30, 0.45], [RAUM.modulation]: [0.20, 0.40],
+  [RAUM.rate]: [0.20, 0.35], [RAUM.diffusion]: [0.50, 0.70], [RAUM.decay]: [0.30, 0.45], [RAUM.damp]: [0.25, 0.45],
+  [RAUM.freeze]: 0,                                   // never left frozen after a switch
+  [SEND.A.perc]: 0, [SEND.A.bass]: 0, [SEND.A.stab]: 0, [SEND.A.lead]: 0, [SEND.A.pad]: 0,
+  [SEND.B.perc]: 0, [SEND.B.bass]: 0, [SEND.B.stab]: 0, [SEND.B.lead]: 0, [SEND.B.pad]: 0,
+  [SEND.AtoB]: 0,                                     // separate returns by default (research)
+};
+const FX_GENRE = {
+  techno: {   // tight delays, big dark room, separate returns
+    [REPLIKA.feedback]: [0.30, 0.50], [REPLIKA.loCut]: [0.25, 0.40], [REPLIKA.hiCut]: [0.40, 0.65],
+    [RAUM.size]: [0.45, 0.70], [RAUM.decay]: [0.35, 0.55], [RAUM.lowCut]: [0.40, 0.55],
+    [SEND.A.perc]: [0.05, 0.15], [SEND.B.perc]: [0.10, 0.25], [SEND.A.stab]: [0.15, 0.35], [SEND.B.stab]: [0.20, 0.40],
+    [SEND.A.lead]: [0.15, 0.35], [SEND.B.lead]: [0.15, 0.35], [SEND.A.pad]: [0.05, 0.15], [SEND.B.pad]: [0.30, 0.50],
+    [SEND.AtoB]: [0.05, 0.15],
+  },
+  house: {    // shorter, brighter
+    [REPLIKA.feedback]: [0.25, 0.40], [REPLIKA.hiCut]: [0.55, 0.80], [REPLIKA.fltCutoff]: [0.65, 0.90],
+    [RAUM.size]: [0.30, 0.50], [RAUM.decay]: [0.25, 0.40], [RAUM.highCut]: [0.55, 0.75],
+    [SEND.A.perc]: [0.05, 0.15], [SEND.B.perc]: [0.10, 0.20], [SEND.A.stab]: [0.20, 0.35], [SEND.B.stab]: [0.15, 0.30],
+    [SEND.A.lead]: [0.15, 0.30], [SEND.B.lead]: [0.10, 0.25], [SEND.AtoB]: [0.10, 0.20],
+  },
+  minimal: {  // dry and small, delay on the percs
+    [REPLIKA.feedback]: [0.20, 0.40], [REPLIKA.hiCut]: [0.40, 0.65],
+    [RAUM.size]: [0.20, 0.40], [RAUM.decay]: [0.20, 0.35],
+    [SEND.A.perc]: [0.05, 0.20], [SEND.B.perc]: [0.05, 0.15], [SEND.A.stab]: [0.15, 0.35], [SEND.B.stab]: [0.10, 0.25],
+    [SEND.AtoB]: [0.05, 0.15],
+  },
+  trance: {   // big and bright, lead and pad drenched
+    [REPLIKA.feedback]: [0.35, 0.55], [REPLIKA.hiCut]: [0.55, 0.80], [REPLIKA.fltCutoff]: [0.65, 0.90],
+    [RAUM.size]: [0.60, 0.85], [RAUM.decay]: [0.50, 0.75], [RAUM.highCut]: [0.55, 0.75],
+    [SEND.A.perc]: [0.00, 0.10], [SEND.B.perc]: [0.05, 0.15], [SEND.A.stab]: [0.15, 0.30], [SEND.B.stab]: [0.25, 0.45],
+    [SEND.A.lead]: [0.25, 0.45], [SEND.B.lead]: [0.30, 0.50], [SEND.A.pad]: [0.10, 0.20], [SEND.B.pad]: [0.40, 0.60],
+    [SEND.AtoB]: [0.15, 0.30],
+  },
+  psy: {      // delay-driven, drier room; feedback/filters/lead sends come from FX_MODES.psy
+    [RAUM.size]: [0.30, 0.50], [RAUM.decay]: [0.25, 0.45],
+    [SEND.A.perc]: [0.00, 0.10], [SEND.B.perc]: [0.05, 0.15], [SEND.A.pad]: [0.05, 0.15], [SEND.B.pad]: [0.30, 0.50],
+    [SEND.AtoB]: [0.05, 0.15],
+  },
+  dubtechno: {},   // fully hand-built in FX_MODES.dubtechno
+  custom: {},
+};
+const fxSpec = (cc, spec) =>
+  typeof spec === 'number' ? [cc, pure(spec), 1]
+  : Array.isArray(spec) ? [cc, fxEvolve(spec[0], spec[1], 500 + cc, 23 + (cc % 37)), 8]
+  : [cc, fxHold(spec.hold[0], spec.hold[1], 500 + cc), 1];
+const _fxMerged = {};
+Object.entries({ ...FX_BASE, ...(FX_GENRE[MODE] || {}) }).forEach(([cc, spec]) => { _fxMerged[cc] = fxSpec(+cc, spec); });
+(FX_MODES[MODE] || []).forEach(e => { _fxMerged[e[0]] = e; });
+const FX_ACTIVE = Object.values(_fxMerged);
 
 // v96 - test aid: prints when each song starts and its FX windows, so you can watch the knobs at those times.
 // Faster test: MODE_OVERRIDES = { songMinutes: 1 } at the top - new song every drop.
