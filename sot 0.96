@@ -902,9 +902,9 @@ const DUB_FX_ON = MODE === 'dubtechno' ? 1 : 0;
 
 const MIDI_CHAN_FX = 1; // TODO move to 16 once the DAW side is remapped (1 is shared with drums)
 const REPLIKA = {
-  feedback: 117, mix: 118, sat: 119, modDepth: 102, fltStereo: 103,
-  fltRate: 106, shuffle: 107, timeA: 108, loCut: 109, hiCut: 110,
-  fltReso: 111, fbkLoop: 112, feel: 113, timeB: 114, psMix: 115, fltDepth: 116,
+  feedback: 117, mix: 118, sat: 119, wowFlutter: 102, fltStereo: 103,     // v96 - names match the rack macros
+  fltRate: 106, ptLinkAB: 107, timeA: 108, loCut: 109, hiCut: 110,
+  fltReso: 111, fbkLoop: 112, ptLinkBA: 113, timeB: 114, fltCutoff: 115, fltDepth: 116,
 };
 const RAUM = {
   feedback: 20, predelay: 21, mix: 22, size: 23, lowCut: 24,
@@ -954,8 +954,8 @@ $: sendFx(REPLIKA.sat, satSig, 8);
 $: sendFx(REPLIKA.fltReso, fltResoSig, 8);
 $: sendFx(REPLIKA.fltDepth, fltDepthSig, 8);
 $: sendFx(REPLIKA.fltRate, fltRateSig, 8);
-$: sendFx(REPLIKA.modDepth, modDepthSig, 8);
-$: sendFx(REPLIKA.psMix, psMixSig, 8);
+$: sendFx(REPLIKA.wowFlutter, modDepthSig, 8);
+$: sendFx(REPLIKA.fltCutoff, psMixSig, 8); // TODO written for a pitch-shift mix - 0-0.22 on Flt Cutoff keeps the filter nearly shut
 
 const leadPulse = "0.8 0 0 0 0 0 0.8 0 0 0 0 0 0.8 0 0 0";
 const leadDrift = perlin.slow(37).range(0.9, 1.05);
