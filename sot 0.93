@@ -198,7 +198,7 @@ function avgBarsPerDrop(patience, dropBars) {
     e = Math.min(E_MAX, e + CLIMB_LO + lcg() * (CLIMB_HI - CLIMB_LO));
     let nowDrop = false;
     if (drop) {
-      nowDrop = dropLen <= dropTarget;
+      nowDrop = dropLen + 1 <= dropTarget; // v94 - +1 to match phrase(), which counts the trigger phrase as dropLen 1
       if (!nowDrop) cool = DROP_COOLDOWN;
     } else if (cool > 0) {
       cool -= 1;
