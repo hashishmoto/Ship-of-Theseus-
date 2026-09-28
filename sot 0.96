@@ -939,8 +939,8 @@ const fxEvolve = (lo, hi, salt, slowBy = 32) => {
 // v96 - no breathing: one value per song inside [lo, hi] - for knobs that jump or pitch-warp when moved (delay times, links)
 const fxHold = (lo, hi, salt) => sig(t => lo + (hi - lo) * rnd(300 + salt, songAtBar(Math.floor(t)), 0)).segment(1);
 // v96 - stepped knobs: one choice per song from [value, weight] pairs
-// Filter Mode zones assume the macro splits 0..1 evenly over HP, LP, BP, Notch, Peak - check on the rack
-const FLT_MODE = { hp: 0.1, lp: 0.3, bp: 0.5, notch: 0.7, peak: 0.9 };
+// Filter Mode zones measured on the rack (0-127): LP 0-25, HP 26-50, BP 51-76, Peak 77-101, Notch 102-127 - values sit mid-zone
+const FLT_MODE = { lp: 0.1, hp: 0.3, bp: 0.5, peak: 0.7, notch: 0.9 };
 const fxPick = (choices, salt) => sig(t => {
   const r = rnd(400 + salt, songAtBar(Math.floor(t)), 0);
   let acc = 0;
