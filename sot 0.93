@@ -889,6 +889,13 @@ $: stack(
 const DROP_RAMP_SIG = sig(t => phrase(Math.floor(stepBar(t)[1] / BARS_PER_PHRASE)).ramp).segment(1);
 const DROP_ACTIVE_SIG = sig(t => phrase(Math.floor(stepBar(t)[1] / BARS_PER_PHRASE)).drop ? 1 : 0).segment(1);
 const DROP_BOOST_SIG = sig(t => phrase(Math.floor(stepBar(t)[1] / BARS_PER_PHRASE)).boost).segment(1);
+const fbSwellAt = bar => {   // v94 - ramp into the drop, peak (1) on its first bar, linear decay to ~0 across it
+  const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
+  if (!st.drop) return st.ramp;
+  const into = (st.dropLen - 1) * BARS_PER_PHRASE + (bar % BARS_PER_PHRASE);
+  return 1 - into / (st.dropTarget * BARS_PER_PHRASE);
+};
+const FB_SWELL_SIG = sig(t => fbSwellAt(stepBar(t)[1])).segment(1);
 
 const FX_ON = MODE === 'psy' ? 1 : 0;
 
@@ -910,7 +917,7 @@ const parkFx = (table, val = 0) =>
   stack(...Object.values(table).map(ccNum => ccv(val).ccn(ccNum))).midichan(MIDI_CHAN_FX).midi(midi);
 
 const fbDrift = perlin.slow(23).range(0.85, 1.10);
-const feedbackSig = DROP_RAMP_SIG.mul(0.57).add(0.28).mul(fbDrift).mul(FX_ON);
+const feedbackSig = FB_SWELL_SIG.mul(0.57).add(0.28).mul(fbDrift).mul(FX_ON);
 $: sendFx(REPLIKA.feedback, feedbackSig, 8);
 
 const fltDrift = perlin.slow(31).range(0.95, 1.05);
