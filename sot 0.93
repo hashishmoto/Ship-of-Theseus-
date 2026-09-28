@@ -53,7 +53,7 @@ const HAT_ROLL     = _preset.hatRoll;       // 0 = accented pattern, 1 = dense r
 const SWING_PCT    = _preset.swingPct;      // 50 = straight, 62 = heavy
 const SWING_GRID   = _preset.swingGrid;     // 8 = shuffles the ghosts, 4 = shuffles the hats
 const BASS_PATTERN = _preset.bassPattern;   // see BASS_PATTERNS below - a rhythmic shape, not a density dial
-const BASS_CHOICES_NAME = _preset.bassChoices; // 'default', 'drone', 'dubtechno' (v24), or 'techno' (v34) - see BASS_CHOICE_SETS below (resolved there, not here, since it's defined later)
+const BASS_CHOICES_NAME = _preset.bassChoices; // 'default', 'drone', 'dubtechno' (v24), 'techno' (v34), or 'psy' - see BASS_CHOICE_SETS below (resolved there, not here, since it's defined later)
 const KICK_DROPS_OUT = _preset.kickDropsOut;
 const OPTIONAL_INCLUDE = _preset.optionalInclude;
 const BASS_CLIP    = _preset.bassClip;      // note length, shorter = more room for the kick
@@ -64,8 +64,8 @@ const STAB_ON        = _preset.stabOn;        // does this genre want chord stab
 const STAB_CHORD_TONES = _preset.stabChordTones; // [0,2,4]=triad, [0,2,4,6]=adds the 7th - see "-- chord --" below
 const PAD_ON         = _preset.padOn;         // does this genre want the sustained pad at all - see MODE_PRESETS above
 const PAD_CHORD_TONES = _preset.padChordTones; // [0,2,4]=full triad, [0,4]=root+5th only - see "-- pad --" below
-const PAD_REST = _preset.padRest;   // per-mode (v87) - see PAD_OCTAVE's own comment below for full reasoning
-const PAD_DRIFT = _preset.padDrift; // per-mode (v87) - see PAD_OCTAVE's own comment below for full reasoning
+const PAD_REST = _preset.padRest;   // per-mode (v87)
+const PAD_DRIFT = _preset.padDrift; // per-mode (v87)
 const STAB_INCLUDE_PRESET = _preset.stabInclude;
 const PAD_INCLUDE_PRESET = _preset.padInclude;
 const MOTIF_INCLUDE_PRESET = _preset.motifInclude;
@@ -74,7 +74,7 @@ const HARMONY_MIN_COUNT = _preset.harmonyMinCount;
 const KIT_DROPS_OUT_PRESET = _preset.kitDropsOut;
 const BASS_DROPS_OUT_PRESET = _preset.bassDropsOut;
 const MAX_OPTIONAL   = _preset.maxOptional;   // kit size on top of the core - see MODE_PRESETS above (was a top-level dial, now mode-driven)
-const DROP_PATIENCE  = _preset.dropPatience;  // breakdown character (frequent/dramatic vs. rare/gradual) - see dropPatience note above MODE_PRESETS (was a top-level dial, now mode-driven)
+const DROP_PATIENCE  = _preset.dropPatience;  // breakdown character (frequent/dramatic vs. rare/gradual) (was a top-level dial, now mode-driven)
 const DROP_BARS      = _preset.dropBars;
 const STAB_REST = _preset.stabRest;
 const BASS_DRIFT_PRESET = _preset.bassDrift;
