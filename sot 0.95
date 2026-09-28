@@ -913,7 +913,7 @@ const RAUM = {
 const SEND = { lead: 85, perc: 86, space: 87 };
 
 const sendFx = (ccNum, sigPattern, res = 8) =>
-  ccv(sigPattern.fmap(x => Math.max(0, Math.min(1, x))).segment(res)).ccn(ccNum)   // v95 - clamp: psy loCut dips below 0 at the drop peak.midichan(MIDI_CHAN_FX).midi(midi);
+  ccv(sigPattern.fmap(x => Math.max(0, Math.min(1, x))).segment(res)).ccn(ccNum).midichan(MIDI_CHAN_FX).midi(midi);   // v95 - clamp: psy loCut dips below 0 at the drop peak
 const parkFx = (table, val = 0) =>
   stack(...Object.values(table).map(ccNum => ccv(val).ccn(ccNum))).midichan(MIDI_CHAN_FX).midi(midi);
 
