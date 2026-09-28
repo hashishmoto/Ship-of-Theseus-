@@ -936,6 +936,8 @@ const fxEvolve = (lo, hi, salt, slowBy = 32) => {
     .early(rnd(60 + salt, 0, 3) * 997).range(-0.25 * w, 0.25 * w);
   return center.add(wobble);
 };
+// v96 - no breathing: one value per song inside [lo, hi] - for knobs that jump or pitch-warp when moved (delay times, links)
+const fxHold = (lo, hi, salt) => sig(t => lo + (hi - lo) * rnd(300 + salt, songAtBar(Math.floor(t)), 0)).segment(1);
 // v96 - squeeze a 0..1 LFO into a per-song window (60% of [lo, hi]) - keeps the LFO's shape and coupling, moves its range each song
 const fxWindowLo = (lo, hi, salt, song) => lo + (hi - lo) * 0.4 * rnd(70 + salt, song, 0);
 const breathIn = (lfo, lo, hi, salt) => {
@@ -969,6 +971,31 @@ const fltDepthSigDub = fxEvolve(0.10, 0.38, 2, 23);
 const fltRateSigDub = fxEvolve(0.15, 0.35, 3, 61);
 const wowSigDub = fxEvolve(0.14, 0.36, 4, 19);
 const stabSendSigDub = gatePat.mul(gateDepth);
+// v96 - rest of the rig. Ranges are guesses unless noted - confirm by ear
+const dubRest = [
+  [REPLIKA.mix,       pure(1), 1],                        // return track - always fully wet (logic)
+  [REPLIKA.fltStereo, fxEvolve(0.20, 0.50, 105, 41), 8],
+  [REPLIKA.fbkLoop,   fxEvolve(0.40, 0.62, 106, 47), 8],
+  [REPLIKA.fltCutoff, fxEvolve(0.30, 0.55, 107, 53), 8],  // darker than open - dub techno is dark (logic)
+  [REPLIKA.timeA,     fxHold(0.22, 0.32, 0), 1],          // held per song - moving a delay time warps pitch
+  [REPLIKA.timeB,     fxHold(0.40, 0.55, 1), 1],
+  [REPLIKA.ptLinkAB,  fxHold(0.30, 0.70, 2), 1],          // unknown function - held, not breathing
+  [REPLIKA.ptLinkBA,  fxHold(0.30, 0.70, 3), 1],
+  [RAUM.feedback,     fxEvolve(0.05, 0.20, 110, 43), 8],  // low - high Raum feedback runs toward infinite
+  [RAUM.predelay,     fxEvolve(0.15, 0.35, 111, 59), 8],
+  [RAUM.mix,          pure(1), 1],                        // return track - always fully wet (logic)
+  [RAUM.size,         fxEvolve(0.35, 0.60, 112, 67), 8],
+  [RAUM.lowCut,       fxEvolve(0.30, 0.50, 113, 37), 8],  // keep lows out of the reverb (research)
+  [RAUM.highCut,      fxEvolve(0.35, 0.60, 114, 31), 8],  // dark (logic)
+  [RAUM.reverb,       fxEvolve(0.25, 0.45, 115, 71), 8],  // short decay on the delays (research)
+  [RAUM.modulation,   fxEvolve(0.20, 0.45, 116, 29), 8],
+  [RAUM.rate,         fxEvolve(0.15, 0.35, 117, 61), 8],
+  [SEND.A.perc,       fxEvolve(0.05, 0.25, 120, 33), 8],
+  [SEND.B.perc,       fxEvolve(0.10, 0.30, 121, 39), 8],
+  [SEND.A.bass,       pure(0), 1],                        // bass dry - keeps the low end clean (logic)
+  [SEND.B.bass,       pure(0), 1],
+  [SEND.B.stab,       fxEvolve(0.30, 0.55, 122, 45), 8],  // stab into the short reverb
+];
 const aToBSigDub = fxEvolve(0.35, 0.65, 0, 29);   // middle range - short-reverb-on-delay, less wash than dub
 
 // v96 - per-mode FX: [cc, signal, steps per cycle]. Only listed CCs are sent,
@@ -992,6 +1019,7 @@ const FX_MODES = {
     [REPLIKA.wowFlutter, wowSigDub,      8],
     [SEND.A.stab,        stabSendSigDub, 16],
     [SEND.AtoB,          aToBSigDub,     8],
+    ...dubRest,
     // [REPLIKA.fltCutoff, perlin.slow(53).range(0.00, 0.22), 8], // off - written for a pitch-shift mix, 0-0.22 shuts Flt Cutoff
   ],
 };
