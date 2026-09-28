@@ -918,7 +918,7 @@ const SEND = {
 const parkFx = (table, val = 0) =>
   stack(...Object.values(table).map(ccNum => ccv(val).ccn(ccNum))).midichan(MIDI_CHAN_FX).midi(midi);
 
-const breath = sine.slow(48).mul(0.72).add(perlin.slow(17).mul(0.28));
+const breath = sine.slow(48).mul(0.72).add(perlin.slow(17).mul(0.28)).early(rnd(69, 0, 0) * 48); // v96 - phase offset per SEED
 const drift = perlin.slow(29);
 const inv = s => s.mul(-1).add(1);
 const gatePat = "<0.85 0.30 0.75 0.05 0.90 0.45 0.60>";
@@ -927,6 +927,15 @@ const dubBreakdownNudge = DROP_ACTIVE_SIG.mul(0.06);
 
 // v96 - a fixed value per SEED inside [lo, hi] - gives each seed its own FX identity
 const fxSeed = (lo, hi, salt) => lo + rnd(60 + salt, 0, 0) * (hi - lo);
+// v96 - breathe + evolve inside [lo, hi]: each song picks a center in the middle half of the range,
+// a slow perlin (rate and phase set by SEED) wanders +-quarter range around it. Never leaves [lo, hi].
+const fxEvolve = (lo, hi, salt, slowBy = 32) => {
+  const w = hi - lo;
+  const center = sig(t => lo + w * (0.25 + 0.5 * rnd(60 + salt, songAtBar(Math.floor(t)), 1))).segment(1);
+  const wobble = perlin.slow(slowBy * (0.75 + 0.5 * rnd(60 + salt, 0, 2)))
+    .early(rnd(60 + salt, 0, 3) * 997).range(-0.25 * w, 0.25 * w);
+  return center.add(wobble);
+};
 
 // -- psy --
 const fbDrift = perlin.slow(23).range(0.85, 1.10);
@@ -949,12 +958,12 @@ const feedbackSigDub = breath.range(0.58, 0.86).add(dubBreakdownNudge);
 const hiCutSigDub = inv(breath).range(0.30, 0.78);
 const loCutSigDub = breath.range(0.12, 0.42);
 const satSigDub = breath.mul(0.6).add(drift.mul(0.4)).range(0.18, 0.52);
-const fltResoSigDub = perlin.slow(37).range(0.08, 0.30);
-const fltDepthSigDub = perlin.slow(23).range(0.10, 0.38);
-const fltRateSigDub = sine.slow(61).range(0.15, 0.35);
-const wowSigDub = perlin.slow(19).range(0.14, 0.36);
+const fltResoSigDub = fxEvolve(0.08, 0.30, 1, 37);
+const fltDepthSigDub = fxEvolve(0.10, 0.38, 2, 23);
+const fltRateSigDub = fxEvolve(0.15, 0.35, 3, 61);
+const wowSigDub = fxEvolve(0.14, 0.36, 4, 19);
 const stabSendSigDub = gatePat.mul(gateDepth);
-const aToBSigDub = pure(fxSeed(0.35, 0.65, 0));   // middle range - short-reverb-on-delay, less wash than dub
+const aToBSigDub = fxEvolve(0.35, 0.65, 0, 29);   // middle range - short-reverb-on-delay, less wash than dub
 
 // v96 - per-mode FX: [cc, signal, steps per cycle]. Only listed CCs are sent,
 // so every other knob stays where you set it. A mode with no entry sends nothing.
@@ -976,7 +985,7 @@ const FX_MODES = {
     [REPLIKA.fltRate,    fltRateSigDub,  8],
     [REPLIKA.wowFlutter, wowSigDub,      8],
     [SEND.A.stab,        stabSendSigDub, 16],
-    [SEND.AtoB,          aToBSigDub,     1],
+    [SEND.AtoB,          aToBSigDub,     8],
     // [REPLIKA.fltCutoff, perlin.slow(53).range(0.00, 0.22), 8], // off - written for a pitch-shift mix, 0-0.22 shuts Flt Cutoff
   ],
 };
