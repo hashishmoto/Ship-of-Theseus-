@@ -513,7 +513,7 @@ function bassProfile(name, kickSteps) {
 
 const VOICES = [
   { name: 'kick', note: 36, songStable: true, include: 1.00, ghost: KICK_GHOST_PRESET, drift: 0, dropsOut: KICK_DROPS_OUT,
-    vel: [0.88, 0.96],
+    vel: [KICK_VEL_LO, KICK_VEL_HI], // v94 - humanized path now honors kickVelLo/Hi (was a fixed 0.88-0.96 that silently ignored them)
     accent: [1.00,1,1,1, 0.95,1,1,1, 0.975,1,1,1, 0.95,1,1,1],
     velMap: KICK_HUMAN_PRESET ? null : KICK_VEL_MAP,
     profile: kickProfile(KICK_PATTERN) },
