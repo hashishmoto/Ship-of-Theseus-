@@ -897,8 +897,6 @@ const dropSwellAt = bar => {   // v95 - ramp into the drop, peak (1) on its firs
 };
 const DROP_SWELL_SIG = sig(t => dropSwellAt(stepBar(t)[1])).segment(1);
 
-const FX_ON = MODE === 'psy' ? 1 : 0;
-const DUB_FX_ON = MODE === 'dubtechno' ? 1 : 0;
 
 const MIDI_CHAN_FX = 16; // v96 - was 1 (shared with drums)
 const REPLIKA = {
@@ -916,8 +914,6 @@ const SEND = {
   B: { perc: 90, bass: 91, stab: 92, lead: 93, pad: 94 },
 };
 
-const sendFx = (ccNum, sigPattern, res = 8) =>
-  ccv(sigPattern.fmap(x => Math.max(0, Math.min(1, x))).segment(res)).ccn(ccNum).midichan(MIDI_CHAN_FX).midi(midi);   // v95 - clamp: psy loCut dips below 0 at the drop peak
 const parkFx = (table, val = 0) =>
   stack(...Object.values(table).map(ccNum => ccv(val).ccn(ccNum))).midichan(MIDI_CHAN_FX).midi(midi);
 
@@ -928,50 +924,60 @@ const gatePat = "<0.85 0.30 0.75 0.05 0.90 0.45 0.60>";
 const gateDepth = perlin.slow(37).range(0.55, 1.0);
 const dubBreakdownNudge = DROP_ACTIVE_SIG.mul(0.06);
 
+// -- psy --
 const fbDrift = perlin.slow(23).range(0.85, 1.10);
-const feedbackSigPsy = DROP_SWELL_SIG.mul(0.57).add(0.28).mul(fbDrift);
-const feedbackSigDub = breath.range(0.58, 0.86).add(dubBreakdownNudge);
-const feedbackSig = feedbackSigPsy.mul(FX_ON).add(feedbackSigDub.mul(DUB_FX_ON));
-$: sendFx(REPLIKA.feedback, feedbackSig, 8);
-
 const fltDrift = perlin.slow(31).range(0.95, 1.05);
+const feedbackSigPsy = DROP_SWELL_SIG.mul(0.57).add(0.28).mul(fbDrift);
 const hiCutSigPsy = sine.slow(8).range(0.35, 0.60).add(DROP_SWELL_SIG.mul(0.32)).mul(fltDrift);
 const loCutSigPsy = sine.slow(4).range(0.15, 0.30).add(DROP_SWELL_SIG.mul(-0.18)).mul(fltDrift);
-const hiCutSigDub = inv(breath).range(0.30, 0.78);
-const loCutSigDub = breath.range(0.12, 0.42);
-const hiCutSig = hiCutSigPsy.mul(FX_ON).add(hiCutSigDub.mul(DUB_FX_ON));
-const loCutSig = loCutSigPsy.mul(FX_ON).add(loCutSigDub.mul(DUB_FX_ON));
-$: sendFx(REPLIKA.hiCut, hiCutSig, 16);
-$: sendFx(REPLIKA.loCut, loCutSig, 16);
-
-const satSig = breath.mul(0.6).add(drift.mul(0.4)).range(0.18, 0.52).mul(DUB_FX_ON);
-const fltResoSig = perlin.slow(37).range(0.08, 0.30).mul(DUB_FX_ON);
-const fltDepthSig = perlin.slow(23).range(0.10, 0.38).mul(DUB_FX_ON);
-const fltRateSig = sine.slow(61).range(0.15, 0.35).mul(DUB_FX_ON);
-const modDepthSig = perlin.slow(19).range(0.14, 0.36).mul(DUB_FX_ON);
-const psMixSig = perlin.slow(53).range(0.00, 0.22).mul(DUB_FX_ON);
-$: sendFx(REPLIKA.sat, satSig, 8);
-$: sendFx(REPLIKA.fltReso, fltResoSig, 8);
-$: sendFx(REPLIKA.fltDepth, fltDepthSig, 8);
-$: sendFx(REPLIKA.fltRate, fltRateSig, 8);
-$: sendFx(REPLIKA.wowFlutter, modDepthSig, 8);
-$: sendFx(REPLIKA.fltCutoff, psMixSig, 8); // TODO written for a pitch-shift mix - 0-0.22 on Flt Cutoff keeps the filter nearly shut
-
 const leadPulse = "0.8 0 0 0 0 0 0.8 0 0 0 0 0 0.8 0 0 0";
 const leadDrift = perlin.slow(37).range(0.9, 1.05);
 const leadSigPsy = leadPulse.mul(leadDrift);
-const leadSigDub = gatePat.mul(gateDepth);
-$: sendFx(SEND.A.lead, leadSigPsy.mul(FX_ON), 16);
-$: sendFx(SEND.A.stab, leadSigDub.mul(DUB_FX_ON), 16);
-
 const spaceDrift = perlin.slow(41).range(0.9, 1.0);
-const spaceSig = DROP_RAMP_SIG.mul(0.45)
+const spaceSigPsy = DROP_RAMP_SIG.mul(0.45)
   .add(DROP_ACTIVE_SIG.mul(0.50))
   .add(DROP_BOOST_SIG.mul(0.20))
   .add(0.05)
-  .mul(spaceDrift)
-  .mul(FX_ON);
-$: sendFx(SEND.B.lead, spaceSig, 8); // v96 - was SEND.space (87), target voice unconfirmed
+  .mul(spaceDrift);
+
+// -- dubtechno --
+const feedbackSigDub = breath.range(0.58, 0.86).add(dubBreakdownNudge);
+const hiCutSigDub = inv(breath).range(0.30, 0.78);
+const loCutSigDub = breath.range(0.12, 0.42);
+const satSigDub = breath.mul(0.6).add(drift.mul(0.4)).range(0.18, 0.52);
+const fltResoSigDub = perlin.slow(37).range(0.08, 0.30);
+const fltDepthSigDub = perlin.slow(23).range(0.10, 0.38);
+const fltRateSigDub = sine.slow(61).range(0.15, 0.35);
+const wowSigDub = perlin.slow(19).range(0.14, 0.36);
+const stabSendSigDub = gatePat.mul(gateDepth);
+
+// v96 - per-mode FX: [cc, signal, steps per cycle]. Only listed CCs are sent,
+// so every other knob stays where you set it. A mode with no entry sends nothing.
+const FX_MODES = {
+  psy: [
+    [REPLIKA.feedback, feedbackSigPsy, 8],
+    [REPLIKA.hiCut,    hiCutSigPsy,    16],
+    [REPLIKA.loCut,    loCutSigPsy,    16],
+    [SEND.A.lead,      leadSigPsy,     16],
+    [SEND.B.lead,      spaceSigPsy,    8],  // was SEND.space (87), target voice unconfirmed
+  ],
+  dubtechno: [
+    [REPLIKA.feedback,   feedbackSigDub, 8],
+    [REPLIKA.hiCut,      hiCutSigDub,    16],
+    [REPLIKA.loCut,      loCutSigDub,    16],
+    [REPLIKA.sat,        satSigDub,      8],
+    [REPLIKA.fltReso,    fltResoSigDub,  8],
+    [REPLIKA.fltDepth,   fltDepthSigDub, 8],
+    [REPLIKA.fltRate,    fltRateSigDub,  8],
+    [REPLIKA.wowFlutter, wowSigDub,      8],
+    [SEND.A.stab,        stabSendSigDub, 16],
+    // [REPLIKA.fltCutoff, perlin.slow(53).range(0.00, 0.22), 8], // off - written for a pitch-shift mix, 0-0.22 shuts Flt Cutoff
+  ],
+};
+const FX_ACTIVE = FX_MODES[MODE] || [];
+const fxPat = ([ccNum, sigPattern, res]) =>
+  ccv(sigPattern.fmap(x => Math.max(0, Math.min(1, x))).segment(res)).ccn(ccNum);
+$: FX_ACTIVE.length ? stack(...FX_ACTIVE.map(fxPat)).midichan(MIDI_CHAN_FX).midi(midi) : silence
 
 
 // $: parkFx(REPLIKA, 0)
