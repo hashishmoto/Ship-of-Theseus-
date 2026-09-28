@@ -900,7 +900,7 @@ const DROP_SWELL_SIG = sig(t => dropSwellAt(stepBar(t)[1])).segment(1);
 const FX_ON = MODE === 'psy' ? 1 : 0;
 const DUB_FX_ON = MODE === 'dubtechno' ? 1 : 0;
 
-const MIDI_CHAN_FX = 1; // TODO move to 16 once the DAW side is remapped (1 is shared with drums)
+const MIDI_CHAN_FX = 16; // v96 - was 1 (shared with drums)
 const REPLIKA = {
   feedback: 117, mix: 118, sat: 119, wowFlutter: 102, fltStereo: 103,     // v96 - names match the rack macros
   fltRate: 106, ptLinkAB: 107, timeA: 108, loCut: 109, hiCut: 110,
