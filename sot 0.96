@@ -901,8 +901,8 @@ const DROP_SWELL_SIG = sig(t => dropSwellAt(stepBar(t)[1])).segment(1);
 const MIDI_CHAN_FX = 16; // v96 - was 1 (shared with drums)
 const REPLIKA = {
   feedback: 117, mix: 118, sat: 119, wowFlutter: 102, fltStereo: 103,     // v96 - names match the rack macros
-  fltRate: 106, ptLinkAB: 107, timeA: 108, loCut: 109, hiCut: 110,
-  fltReso: 111, fbkLoop: 112, ptLinkBA: 113, timeB: 114, fltCutoff: 115, fltDepth: 116,
+  fltRate: 106, fltMode: 107, timeA: 108, loCut: 109, hiCut: 110,
+  fltReso: 111, fbkLoop: 112, fbkBalance: 113, timeB: 114, fltCutoff: 115, fltDepth: 116,
 };
 const RAUM = {
   feedback: 20, predelay: 21, mix: 22, size: 23, lowCut: 24,
@@ -938,6 +938,16 @@ const fxEvolve = (lo, hi, salt, slowBy = 32) => {
 };
 // v96 - no breathing: one value per song inside [lo, hi] - for knobs that jump or pitch-warp when moved (delay times, links)
 const fxHold = (lo, hi, salt) => sig(t => lo + (hi - lo) * rnd(300 + salt, songAtBar(Math.floor(t)), 0)).segment(1);
+// v96 - stepped knobs: one choice per song from [value, weight] pairs
+// Filter Mode zones assume the macro splits 0..1 evenly over HP, LP, BP, Notch, Peak - check on the rack
+const FLT_MODE = { hp: 0.1, lp: 0.3, bp: 0.5, notch: 0.7, peak: 0.9 };
+const fxPick = (choices, salt) => sig(t => {
+  const r = rnd(400 + salt, songAtBar(Math.floor(t)), 0);
+  let acc = 0;
+  const total = choices.reduce((a, c) => a + c[1], 0);
+  for (const [val, w] of choices) { acc += w / total; if (r < acc) return val; }
+  return choices[0][0];
+}).segment(1);
 // v96 - squeeze a 0..1 LFO into a per-song window (60% of [lo, hi]) - keeps the LFO's shape and coupling, moves its range each song
 const fxWindowLo = (lo, hi, salt, song) => lo + (hi - lo) * 0.4 * rnd(70 + salt, song, 0);
 const breathIn = (lfo, lo, hi, salt) => {
@@ -979,8 +989,8 @@ const dubRest = [
   [REPLIKA.fltCutoff, fxEvolve(0.30, 0.55, 107, 53), 8],  // darker than open - dub techno is dark (logic)
   [REPLIKA.timeA,     fxHold(0.22, 0.32, 0), 1],          // held per song - moving a delay time warps pitch
   [REPLIKA.timeB,     fxHold(0.40, 0.55, 1), 1],
-  [REPLIKA.ptLinkAB,  fxHold(0.30, 0.70, 2), 1],          // unknown function - held, not breathing
-  [REPLIKA.ptLinkBA,  fxHold(0.30, 0.70, 3), 1],
+  [REPLIKA.fltMode,   fxPick([[FLT_MODE.lp, 0.5], [FLT_MODE.bp, 0.4], [FLT_MODE.hp, 0.1]], 0), 1], // per song - LP dark, BP the classic filtered dub echo (logic), weights guessed
+  [REPLIKA.fbkBalance, fxEvolve(0.35, 0.65, 108, 57), 8],
   [RAUM.feedback,     fxEvolve(0.05, 0.20, 110, 43), 8],  // low - high Raum feedback runs toward infinite
   [RAUM.predelay,     fxEvolve(0.15, 0.35, 111, 59), 8],
   [RAUM.mix,          pure(1), 1],                        // return track - always fully wet (logic)
