@@ -936,6 +936,12 @@ const fxEvolve = (lo, hi, salt, slowBy = 32) => {
     .early(rnd(60 + salt, 0, 3) * 997).range(-0.25 * w, 0.25 * w);
   return center.add(wobble);
 };
+// v96 - squeeze a 0..1 LFO into a per-song window (60% of [lo, hi]) - keeps the LFO's shape and coupling, moves its range each song
+const fxWindowLo = (lo, hi, salt, song) => lo + (hi - lo) * 0.4 * rnd(70 + salt, song, 0);
+const breathIn = (lfo, lo, hi, salt) => {
+  const base = sig(t => fxWindowLo(lo, hi, salt, songAtBar(Math.floor(t)))).segment(1);
+  return lfo.mul(0.6 * (hi - lo)).add(base);
+};
 
 // -- psy --
 const fbDrift = perlin.slow(23).range(0.85, 1.10);
@@ -954,10 +960,10 @@ const spaceSigPsy = DROP_RAMP_SIG.mul(0.45)
   .mul(spaceDrift);
 
 // -- dubtechno --
-const feedbackSigDub = breath.range(0.58, 0.86).add(dubBreakdownNudge);
-const hiCutSigDub = inv(breath).range(0.30, 0.78);
-const loCutSigDub = breath.range(0.12, 0.42);
-const satSigDub = breath.mul(0.6).add(drift.mul(0.4)).range(0.18, 0.52);
+const feedbackSigDub = breathIn(breath, 0.58, 0.86, 0).add(dubBreakdownNudge);
+const hiCutSigDub = breathIn(inv(breath), 0.30, 0.78, 1);
+const loCutSigDub = breathIn(breath, 0.12, 0.42, 2);
+const satSigDub = breathIn(breath.mul(0.6).add(drift.mul(0.4)), 0.18, 0.52, 3);
 const fltResoSigDub = fxEvolve(0.08, 0.30, 1, 37);
 const fltDepthSigDub = fxEvolve(0.10, 0.38, 2, 23);
 const fltRateSigDub = fxEvolve(0.15, 0.35, 3, 61);
@@ -990,6 +996,29 @@ const FX_MODES = {
   ],
 };
 const FX_ACTIVE = FX_MODES[MODE] || [];
+
+// v96 - test aid: prints when each song starts and its FX windows, so you can watch the knobs at those times.
+// Faster test: MODE_OVERRIDES = { songMinutes: 1 } at the top - new song every drop.
+const FX_WINDOWS = {
+  dubtechno: [['feedback', 0.58, 0.86, 0], ['hiCut', 0.30, 0.78, 1], ['loCut', 0.12, 0.42, 2], ['sat', 0.18, 0.52, 3]],
+};
+function logFxSchedule(songs) {
+  const wins = FX_WINDOWS[MODE];
+  if (!wins) return;
+  const out = ['fx ' + MODE + ' - per-song windows:'];
+  let song = -1;
+  for (let ph = 0; ph < 5000 && song < songs - 1; ph++) {
+    if (phrase(ph).song === song) continue;
+    song = phrase(ph).song;
+    const mins = (ph * BARS_PER_PHRASE * SECS_PER_BAR / 60).toFixed(1);
+    out.push('  song ' + song + ' @ ' + mins + ' min  ' + wins.map(([n, lo, hi, salt]) => {
+      const a = fxWindowLo(lo, hi, salt, song);
+      return n + ' ' + Math.round(a * 127) + '-' + Math.round((a + 0.6 * (hi - lo)) * 127);
+    }).join('  '));
+  }
+  console.log(out.join('\n'));
+}
+logFxSchedule(6);
 const fxPat = ([ccNum, sigPattern, res]) =>
   ccv(sigPattern.fmap(x => Math.max(0, Math.min(1, x))).segment(res)).ccn(ccNum);
 $: FX_ACTIVE.length ? stack(...FX_ACTIVE.map(fxPat)).midichan(MIDI_CHAN_FX).midi(midi) : silence
