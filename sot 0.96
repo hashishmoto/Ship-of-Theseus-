@@ -1122,8 +1122,22 @@ function logFxSchedule(songs) {
   console.log(out.join('\n'));
 }
 logFxSchedule(6);
+// v96 - glide on re-evaluate (mode switch, seed change...): every CC slides from the last value it sent
+// to the new one over GLIDE_BARS, so a live switch never jumps. Stepped/latching knobs switch at once.
+const GLIDE_BARS = 8;
+const GLIDE_MS = GLIDE_BARS * SECS_PER_BAR * 1000;
+const NO_GLIDE = [REPLIKA.fltMode, RAUM.freeze];
+const _fxMem = (globalThis.__sotFx = globalThis.__sotFx || { last: {}, from: {}, at: 0 });
+_fxMem.from = { ..._fxMem.last };
+_fxMem.at = Date.now();
 const fxPat = ([ccNum, sigPattern, res]) =>
-  ccv(sigPattern.fmap(x => Math.max(0, Math.min(1, x))).segment(res)).ccn(ccNum);
+  ccv(sigPattern.fmap(x => {
+    let v = Math.max(0, Math.min(1, x));
+    const f = _fxMem.from[ccNum];
+    if (f !== undefined && !NO_GLIDE.includes(ccNum)) v = f + (v - f) * Math.min(1, (Date.now() - _fxMem.at) / GLIDE_MS);
+    _fxMem.last[ccNum] = v;
+    return v;
+  }).segment(res)).ccn(ccNum);
 $: FX_ACTIVE.length ? stack(...FX_ACTIVE.map(fxPat)).midichan(MIDI_CHAN_FX).midi(midi) : silence
 
 
