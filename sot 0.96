@@ -1,4 +1,4 @@
-// SHIP OF THESEUS - live, NO VOICE fork - v93
+// SHIP OF THESEUS - live, NO VOICE fork - v96
 const midi = 'IAC Driver Bus 1';
 
 const SEED          = 420;   // set: 1-100
@@ -108,7 +108,7 @@ const PAD_OCTAVE = 48;
 const PAD_CLIP = _preset.padClip;
 
 
-const drumChan = 1, bassChan = 2, stabChan = 3, motifChan = 5, padChan = 6;
+const drumChan = 1, bassChan = 2, stabChan = 3, motifChan = 4, padChan = 5; // v96 - motif 5->4, pad 6->5
 const BASS_OCTAVE = 36;
 const BASS_OFFBEAT  = 0.85;
 const BASS_SIXTEENTH = 0.55;
@@ -889,55 +889,256 @@ $: stack(
 const DROP_RAMP_SIG = sig(t => phrase(Math.floor(stepBar(t)[1] / BARS_PER_PHRASE)).ramp).segment(1);
 const DROP_ACTIVE_SIG = sig(t => phrase(Math.floor(stepBar(t)[1] / BARS_PER_PHRASE)).drop ? 1 : 0).segment(1);
 const DROP_BOOST_SIG = sig(t => phrase(Math.floor(stepBar(t)[1] / BARS_PER_PHRASE)).boost).segment(1);
-const fbSwellAt = bar => {   // v94 - ramp into the drop, peak (1) on its first bar, linear decay to ~0 across it
+const dropSwellAt = bar => {   // v95 - ramp into the drop, peak (1) on its first bar, linear decay to ~0 across it
   const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
   if (!st.drop) return st.ramp;
   const into = (st.dropLen - 1) * BARS_PER_PHRASE + (bar % BARS_PER_PHRASE);
   return 1 - into / (st.dropTarget * BARS_PER_PHRASE);
 };
-const FB_SWELL_SIG = sig(t => fbSwellAt(stepBar(t)[1])).segment(1);
+const DROP_SWELL_SIG = sig(t => dropSwellAt(stepBar(t)[1])).segment(1);
 
-const FX_ON = MODE === 'psy' ? 1 : 0;
 
-const MIDI_CHAN_FX = 1;
+const MIDI_CHAN_FX = 16; // v96 - was 1 (shared with drums)
 const REPLIKA = {
-  feedback: 117, mix: 118, sat: 119, modDepth: 102, fltStereo: 103,
-  fltRate: 106, shuffle: 107, timeA: 108, loCut: 109, hiCut: 110,
-  fltReso: 111, fbkLoop: 112, feel: 113, timeB: 114, psMix: 115, fltDepth: 116,
+  feedback: 117, mix: 118, sat: 119, wowFlutter: 102, fltStereo: 103,     // v96 - names match the rack macros
+  fltRate: 106, fltMode: 107, timeA: 108, loCut: 109, hiCut: 110,
+  fltReso: 111, fbkLoop: 112, fbkBalance: 113, timeB: 114, fltCutoff: 115, fltDepth: 116,
 };
 const RAUM = {
   feedback: 20, predelay: 21, mix: 22, size: 23, lowCut: 24,
   highCut: 25, reverb: 26, modulation: 27, rate: 28,
+  density: 29, diffusion: 30, decay: 31, damp: 14, mode: 15, freeze: 16,   // v96 - mode/density are stepped, freeze latches - not automated yet
 };
-const SEND = { lead: 85, perc: 86, space: 87 };
+// v96 - one send per voice per effect: A = Replika, B = Raum
+const SEND = {
+  A: { perc: 85, bass: 86, stab: 87, lead: 88, pad: 89 },
+  B: { perc: 90, bass: 91, stab: 92, lead: 93, pad: 94 },
+  AtoB: 95,   // return A (Replika) into return B (Raum) - dub chain. One direction only, no B->A, so no loop
+};
 
-const sendFx = (ccNum, sigPattern, res = 8) =>
-  ccv(sigPattern.segment(res)).ccn(ccNum).midichan(MIDI_CHAN_FX).midi(midi);
 const parkFx = (table, val = 0) =>
   stack(...Object.values(table).map(ccNum => ccv(val).ccn(ccNum))).midichan(MIDI_CHAN_FX).midi(midi);
 
+const breath = sine.slow(48).mul(0.72).add(perlin.slow(17).mul(0.28)).early(rnd(69, 0, 0) * 48); // v96 - phase offset per SEED
+const drift = perlin.slow(29);
+const inv = s => s.mul(-1).add(1);
+const gatePat = "<0.85 0.30 0.75 0.05 0.90 0.45 0.60>";
+const gateDepth = perlin.slow(37).range(0.55, 1.0);
+const dubBreakdownNudge = DROP_ACTIVE_SIG.mul(0.06);
+
+// v96 - a fixed value per SEED inside [lo, hi] - gives each seed its own FX identity
+const fxSeed = (lo, hi, salt) => lo + rnd(60 + salt, 0, 0) * (hi - lo);
+// v96 - breathe + evolve inside [lo, hi]: each song picks a center in the middle half of the range,
+// a slow perlin (rate and phase set by SEED) wanders +-quarter range around it. Never leaves [lo, hi].
+const fxEvolve = (lo, hi, salt, slowBy = 32) => {
+  const w = hi - lo;
+  const center = sig(t => lo + w * (0.25 + 0.5 * rnd(60 + salt, songAtBar(Math.floor(t)), 1))).segment(1);
+  const wobble = perlin.slow(slowBy * (0.75 + 0.5 * rnd(60 + salt, 0, 2)))
+    .early(rnd(60 + salt, 0, 3) * 997).range(-0.25 * w, 0.25 * w);
+  return center.add(wobble);
+};
+// v96 - no breathing: one value per song inside [lo, hi] - for knobs that jump or pitch-warp when moved (delay times, links)
+const fxHold = (lo, hi, salt) => sig(t => lo + (hi - lo) * rnd(300 + salt, songAtBar(Math.floor(t)), 0)).segment(1);
+// v96 - stepped knobs: one choice per song from [value, weight] pairs
+// Filter Mode zones measured on the rack (0-127): LP 0-25, HP 26-50, BP 51-76, Peak 77-101, Notch 102-127 - values sit mid-zone
+const FLT_MODE = { lp: 0.1, hp: 0.3, bp: 0.5, peak: 0.7, notch: 0.9 };
+const fxPick = (choices, salt) => sig(t => {
+  const r = rnd(400 + salt, songAtBar(Math.floor(t)), 0);
+  let acc = 0;
+  const total = choices.reduce((a, c) => a + c[1], 0);
+  for (const [val, w] of choices) { acc += w / total; if (r < acc) return val; }
+  return choices[0][0];
+}).segment(1);
+// v96 - squeeze a 0..1 LFO into a per-song window (60% of [lo, hi]) - keeps the LFO's shape and coupling, moves its range each song
+const fxWindowLo = (lo, hi, salt, song) => lo + (hi - lo) * 0.4 * rnd(70 + salt, song, 0);
+const breathIn = (lfo, lo, hi, salt) => {
+  const base = sig(t => fxWindowLo(lo, hi, salt, songAtBar(Math.floor(t)))).segment(1);
+  return lfo.mul(0.6 * (hi - lo)).add(base);
+};
+
+// -- psy --
 const fbDrift = perlin.slow(23).range(0.85, 1.10);
-const feedbackSig = FB_SWELL_SIG.mul(0.57).add(0.28).mul(fbDrift).mul(FX_ON);
-$: sendFx(REPLIKA.feedback, feedbackSig, 8);
-
 const fltDrift = perlin.slow(31).range(0.95, 1.05);
-const hiCutSig = sine.slow(8).range(0.35, 0.60).add(DROP_RAMP_SIG.mul(0.32)).mul(fltDrift).mul(FX_ON);
-const loCutSig = sine.slow(4).range(0.15, 0.30).add(DROP_RAMP_SIG.mul(-0.18)).mul(fltDrift).mul(FX_ON);
-$: sendFx(REPLIKA.hiCut, hiCutSig, 16);
-$: sendFx(REPLIKA.loCut, loCutSig, 16);
-
+const feedbackSigPsy = DROP_SWELL_SIG.mul(0.57).add(0.28).mul(fbDrift);
+const hiCutSigPsy = sine.slow(8).range(0.35, 0.60).add(DROP_SWELL_SIG.mul(0.32)).mul(fltDrift);
+const loCutSigPsy = sine.slow(4).range(0.15, 0.30).add(DROP_SWELL_SIG.mul(-0.18)).mul(fltDrift);
 const leadPulse = "0.8 0 0 0 0 0 0.8 0 0 0 0 0 0.8 0 0 0";
 const leadDrift = perlin.slow(37).range(0.9, 1.05);
-$: sendFx(SEND.lead, leadPulse.mul(leadDrift).mul(FX_ON), 16);
-
+const leadSigPsy = leadPulse.mul(leadDrift);
 const spaceDrift = perlin.slow(41).range(0.9, 1.0);
-const spaceSig = DROP_RAMP_SIG.mul(0.45)
+const spaceSigPsy = DROP_RAMP_SIG.mul(0.45)
   .add(DROP_ACTIVE_SIG.mul(0.50))
   .add(DROP_BOOST_SIG.mul(0.20))
   .add(0.05)
-  .mul(spaceDrift)
-  .mul(FX_ON);
-$: sendFx(SEND.space, spaceSig, 8);
+  .mul(spaceDrift);
+
+// -- dubtechno --
+const feedbackSigDub = breathIn(breath, 0.58, 0.86, 0).add(dubBreakdownNudge);
+const hiCutSigDub = breathIn(inv(breath), 0.30, 0.78, 1);
+const loCutSigDub = breathIn(breath, 0.12, 0.42, 2);
+const satSigDub = breathIn(breath.mul(0.6).add(drift.mul(0.4)), 0.18, 0.52, 3);
+const fltResoSigDub = fxEvolve(0.08, 0.30, 1, 37);
+const fltDepthSigDub = fxEvolve(0.10, 0.38, 2, 23);
+const fltRateSigDub = fxEvolve(0.15, 0.35, 3, 61);
+const wowSigDub = fxEvolve(0.14, 0.36, 4, 19);
+const stabSendSigDub = gatePat.mul(gateDepth);
+// v96 - rest of the rig. Ranges are guesses unless noted - confirm by ear
+const dubRest = [
+  [REPLIKA.mix,       pure(1), 1],                        // return track - always fully wet (logic)
+  [REPLIKA.fltStereo, fxEvolve(0.20, 0.50, 105, 41), 8],
+  [REPLIKA.fbkLoop,   fxEvolve(0.40, 0.62, 106, 47), 8],
+  [REPLIKA.fltCutoff, fxEvolve(0.30, 0.55, 107, 53), 8],  // darker than open - dub techno is dark (logic)
+  [REPLIKA.timeA,     fxHold(0.22, 0.32, 0), 1],          // held per song - moving a delay time warps pitch
+  [REPLIKA.timeB,     fxHold(0.40, 0.55, 1), 1],
+  [REPLIKA.fltMode,   fxPick([[FLT_MODE.lp, 0.5], [FLT_MODE.bp, 0.4], [FLT_MODE.hp, 0.1]], 0), 1], // per song - LP dark, BP the classic filtered dub echo (logic), weights guessed
+  [REPLIKA.fbkBalance, fxEvolve(0.35, 0.65, 108, 57), 8],
+  [RAUM.feedback,     fxEvolve(0.05, 0.20, 110, 43), 8],  // low - high Raum feedback runs toward infinite
+  [RAUM.predelay,     fxEvolve(0.15, 0.35, 111, 59), 8],
+  [RAUM.mix,          pure(1), 1],                        // return track - always fully wet (logic)
+  [RAUM.size,         fxEvolve(0.35, 0.60, 112, 67), 8],
+  [RAUM.lowCut,       fxEvolve(0.30, 0.50, 113, 37), 8],  // keep lows out of the reverb (research)
+  [RAUM.highCut,      fxEvolve(0.35, 0.60, 114, 31), 8],  // dark (logic)
+  [RAUM.reverb,       fxEvolve(0.25, 0.45, 115, 71), 8],  // short decay on the delays (research)
+  [RAUM.modulation,   fxEvolve(0.20, 0.45, 116, 29), 8],
+  [RAUM.rate,         fxEvolve(0.15, 0.35, 117, 61), 8],
+  [RAUM.diffusion,    fxEvolve(0.50, 0.75, 119, 51), 8],  // smooth wash
+  [RAUM.decay,        fxEvolve(0.20, 0.40, 123, 73), 8],  // short (research)
+  [RAUM.damp,         fxEvolve(0.30, 0.55, 124, 49), 8],  // dark (logic)
+  [SEND.A.perc,       fxEvolve(0.05, 0.25, 120, 33), 8],
+  [SEND.B.perc,       fxEvolve(0.10, 0.30, 121, 39), 8],
+  [SEND.A.bass,       pure(0), 1],                        // bass dry - keeps the low end clean (logic)
+  [SEND.B.bass,       pure(0), 1],
+  [SEND.B.stab,       fxEvolve(0.30, 0.55, 122, 45), 8],  // stab into the short reverb
+];
+const aToBSigDub = fxEvolve(0.35, 0.75, 0, 29);   // middle range - short-reverb-on-delay, less wash than dub
+
+// v96 - per-mode FX: [cc, signal, steps per cycle]. Only listed CCs are sent,
+// so every other knob stays where you set it. A mode with no entry sends nothing.
+const FX_MODES = {
+  psy: [
+    [REPLIKA.feedback, feedbackSigPsy, 8],
+    [REPLIKA.hiCut,    hiCutSigPsy,    16],
+    [REPLIKA.loCut,    loCutSigPsy,    16],
+    [SEND.A.lead,      leadSigPsy,     16],
+    [SEND.B.lead,      spaceSigPsy,    8],  // was SEND.space (87), target voice unconfirmed
+  ],
+  dubtechno: [
+    [REPLIKA.feedback,   feedbackSigDub, 8],
+    [REPLIKA.hiCut,      hiCutSigDub,    16],
+    [REPLIKA.loCut,      loCutSigDub,    16],
+    [REPLIKA.sat,        satSigDub,      8],
+    [REPLIKA.fltReso,    fltResoSigDub,  8],
+    [REPLIKA.fltDepth,   fltDepthSigDub, 8],
+    [REPLIKA.fltRate,    fltRateSigDub,  8],
+    [REPLIKA.wowFlutter, wowSigDub,      8],
+    [SEND.A.stab,        stabSendSigDub, 16],
+    [SEND.AtoB,          aToBSigDub,     8],
+    ...dubRest,
+    // [REPLIKA.fltCutoff, perlin.slow(53).range(0.00, 0.22), 8], // off - written for a pitch-shift mix, 0-0.22 shuts Flt Cutoff
+  ],
+};
+
+// v96 - every mode sets every CC, so a live mode switch never keeps the last genre's values.
+// Spec: number = static, [lo, hi] = breathe + evolve per song/SEED, { hold: [lo, hi] } = one value per song.
+// FX_BASE applies to all modes, FX_GENRE overrides per mode, FX_MODES (hand-built signals above) wins over both.
+// All ranges are educated guesses unless a comment says otherwise - confirm by ear.
+const FX_BASE = {
+  [REPLIKA.feedback]: [0.25, 0.45], [REPLIKA.mix]: 1, [REPLIKA.sat]: [0.10, 0.25], [REPLIKA.wowFlutter]: [0.05, 0.15],
+  [REPLIKA.fltStereo]: [0.20, 0.45], [REPLIKA.fltRate]: [0.15, 0.30], [REPLIKA.fltMode]: FLT_MODE.lp,
+  [REPLIKA.timeA]: 0.27, [REPLIKA.timeB]: 0.48,       // your current knob settings (34 / 61)
+  [REPLIKA.loCut]: [0.20, 0.35], [REPLIKA.hiCut]: [0.45, 0.70], [REPLIKA.fltReso]: [0.05, 0.20],
+  [REPLIKA.fbkLoop]: [0.35, 0.55], [REPLIKA.fbkBalance]: [0.40, 0.60], [REPLIKA.fltCutoff]: [0.55, 0.80], [REPLIKA.fltDepth]: [0.05, 0.20],
+  [RAUM.feedback]: [0.10, 0.20], [RAUM.predelay]: [0.20, 0.35], [RAUM.mix]: 1, [RAUM.size]: [0.35, 0.55],
+  [RAUM.lowCut]: [0.35, 0.50], [RAUM.highCut]: [0.45, 0.65], [RAUM.reverb]: [0.30, 0.45], [RAUM.modulation]: [0.20, 0.40],
+  [RAUM.rate]: [0.20, 0.35], [RAUM.diffusion]: [0.50, 0.70], [RAUM.decay]: [0.30, 0.45], [RAUM.damp]: [0.25, 0.45],
+  [RAUM.freeze]: 0,                                   // never left frozen after a switch
+  [SEND.A.perc]: 0, [SEND.A.bass]: 0, [SEND.A.stab]: 0, [SEND.A.lead]: 0, [SEND.A.pad]: 0,
+  [SEND.B.perc]: 0, [SEND.B.bass]: 0, [SEND.B.stab]: 0, [SEND.B.lead]: 0, [SEND.B.pad]: 0,
+  [SEND.AtoB]: 0,                                     // separate returns by default (research)
+};
+const FX_GENRE = {
+  techno: {   // tight delays, big dark room, separate returns
+    [REPLIKA.feedback]: [0.30, 0.50], [REPLIKA.loCut]: [0.25, 0.40], [REPLIKA.hiCut]: [0.40, 0.65],
+    [RAUM.size]: [0.45, 0.70], [RAUM.decay]: [0.35, 0.55], [RAUM.lowCut]: [0.40, 0.55],
+    [SEND.A.perc]: [0.05, 0.15], [SEND.B.perc]: [0.10, 0.25], [SEND.A.stab]: [0.15, 0.35], [SEND.B.stab]: [0.20, 0.40],
+    [SEND.A.lead]: [0.15, 0.35], [SEND.B.lead]: [0.15, 0.35], [SEND.A.pad]: [0.05, 0.15], [SEND.B.pad]: [0.30, 0.50],
+    [SEND.AtoB]: [0.05, 0.15],
+  },
+  house: {    // shorter, brighter
+    [REPLIKA.feedback]: [0.25, 0.40], [REPLIKA.hiCut]: [0.55, 0.80], [REPLIKA.fltCutoff]: [0.65, 0.90],
+    [RAUM.size]: [0.30, 0.50], [RAUM.decay]: [0.25, 0.40], [RAUM.highCut]: [0.55, 0.75],
+    [SEND.A.perc]: [0.05, 0.15], [SEND.B.perc]: [0.10, 0.20], [SEND.A.stab]: [0.20, 0.35], [SEND.B.stab]: [0.15, 0.30],
+    [SEND.A.lead]: [0.15, 0.30], [SEND.B.lead]: [0.10, 0.25], [SEND.AtoB]: [0.10, 0.20],
+  },
+  minimal: {  // dry and small, delay on the percs
+    [REPLIKA.feedback]: [0.20, 0.40], [REPLIKA.hiCut]: [0.40, 0.65],
+    [RAUM.size]: [0.20, 0.40], [RAUM.decay]: [0.20, 0.35],
+    [SEND.A.perc]: [0.05, 0.20], [SEND.B.perc]: [0.05, 0.15], [SEND.A.stab]: [0.15, 0.35], [SEND.B.stab]: [0.10, 0.25],
+    [SEND.AtoB]: [0.05, 0.15],
+  },
+  trance: {   // big and bright, lead and pad drenched
+    [REPLIKA.feedback]: [0.35, 0.55], [REPLIKA.hiCut]: [0.55, 0.80], [REPLIKA.fltCutoff]: [0.65, 0.90],
+    [RAUM.size]: [0.60, 0.85], [RAUM.decay]: [0.50, 0.75], [RAUM.highCut]: [0.55, 0.75],
+    [SEND.A.perc]: [0.00, 0.10], [SEND.B.perc]: [0.05, 0.15], [SEND.A.stab]: [0.15, 0.30], [SEND.B.stab]: [0.25, 0.45],
+    [SEND.A.lead]: [0.25, 0.45], [SEND.B.lead]: [0.30, 0.50], [SEND.A.pad]: [0.10, 0.20], [SEND.B.pad]: [0.40, 0.60],
+    [SEND.AtoB]: [0.15, 0.30],
+  },
+  psy: {      // delay-driven, drier room; feedback/filters/lead sends come from FX_MODES.psy
+    [RAUM.size]: [0.30, 0.50], [RAUM.decay]: [0.25, 0.45],
+    [SEND.A.perc]: [0.00, 0.10], [SEND.B.perc]: [0.05, 0.15], [SEND.A.pad]: [0.05, 0.15], [SEND.B.pad]: [0.30, 0.50],
+    [SEND.AtoB]: [0.05, 0.15],
+  },
+  dubtechno: {},   // fully hand-built in FX_MODES.dubtechno
+  custom: {},
+};
+const fxSpec = (cc, spec) =>
+  typeof spec === 'number' ? [cc, pure(spec), 1]
+  : Array.isArray(spec) ? [cc, fxEvolve(spec[0], spec[1], 500 + cc, 23 + (cc % 37)), 8]
+  : [cc, fxHold(spec.hold[0], spec.hold[1], 500 + cc), 1];
+const _fxMerged = {};
+Object.entries({ ...FX_BASE, ...(FX_GENRE[MODE] || {}) }).forEach(([cc, spec]) => { _fxMerged[cc] = fxSpec(+cc, spec); });
+(FX_MODES[MODE] || []).forEach(e => { _fxMerged[e[0]] = e; });
+const FX_ACTIVE = Object.values(_fxMerged);
+
+// v96 - test aid: prints when each song starts and its FX windows, so you can watch the knobs at those times.
+// Faster test: MODE_OVERRIDES = { songMinutes: 1 } at the top - new song every drop.
+const FX_WINDOWS = {
+  dubtechno: [['feedback', 0.58, 0.86, 0], ['hiCut', 0.30, 0.78, 1], ['loCut', 0.12, 0.42, 2], ['sat', 0.18, 0.52, 3]],
+};
+function logFxSchedule(songs) {
+  const wins = FX_WINDOWS[MODE];
+  if (!wins) return;
+  const out = ['fx ' + MODE + ' - per-song windows:'];
+  let song = -1;
+  for (let ph = 0; ph < 5000 && song < songs - 1; ph++) {
+    if (phrase(ph).song === song) continue;
+    song = phrase(ph).song;
+    const mins = (ph * BARS_PER_PHRASE * SECS_PER_BAR / 60).toFixed(1);
+    out.push('  song ' + song + ' @ ' + mins + ' min  ' + wins.map(([n, lo, hi, salt]) => {
+      const a = fxWindowLo(lo, hi, salt, song);
+      return n + ' ' + Math.round(a * 127) + '-' + Math.round((a + 0.6 * (hi - lo)) * 127);
+    }).join('  '));
+  }
+  console.log(out.join('\n'));
+}
+logFxSchedule(6);
+// v96 - glide on re-evaluate (mode switch, seed change...): every CC slides from the last value it sent
+// to the new one over GLIDE_BARS, so a live switch never jumps. Stepped/latching knobs switch at once.
+const GLIDE_BARS = 8;
+const GLIDE_MS = GLIDE_BARS * SECS_PER_BAR * 1000;
+const NO_GLIDE = [REPLIKA.fltMode, RAUM.freeze];
+const _fxMem = (globalThis.__sotFx = globalThis.__sotFx || { last: {}, from: {}, at: 0 });
+_fxMem.from = { ..._fxMem.last };
+_fxMem.at = Date.now();
+const fxPat = ([ccNum, sigPattern, res]) =>
+  ccv(sigPattern.fmap(x => {
+    let v = Math.max(0, Math.min(1, x));
+    const f = _fxMem.from[ccNum];
+    if (f !== undefined && !NO_GLIDE.includes(ccNum)) v = f + (v - f) * Math.min(1, (Date.now() - _fxMem.at) / GLIDE_MS);
+    _fxMem.last[ccNum] = v;
+    return v;
+  }).segment(res)).ccn(ccNum);
+$: FX_ACTIVE.length ? stack(...FX_ACTIVE.map(fxPat)).midichan(MIDI_CHAN_FX).midi(midi) : silence
 
 
 // $: parkFx(REPLIKA, 0)

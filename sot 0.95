@@ -1,4 +1,4 @@
-// SHIP OF THESEUS - live, NO VOICE fork - v93
+// SHIP OF THESEUS - live, NO VOICE fork - v95
 const midi = 'IAC Driver Bus 1';
 
 const SEED          = 420;   // set: 1-100
@@ -889,15 +889,16 @@ $: stack(
 const DROP_RAMP_SIG = sig(t => phrase(Math.floor(stepBar(t)[1] / BARS_PER_PHRASE)).ramp).segment(1);
 const DROP_ACTIVE_SIG = sig(t => phrase(Math.floor(stepBar(t)[1] / BARS_PER_PHRASE)).drop ? 1 : 0).segment(1);
 const DROP_BOOST_SIG = sig(t => phrase(Math.floor(stepBar(t)[1] / BARS_PER_PHRASE)).boost).segment(1);
-const fbSwellAt = bar => {   // v94 - ramp into the drop, peak (1) on its first bar, linear decay to ~0 across it
+const dropSwellAt = bar => {   // v95 - ramp into the drop, peak (1) on its first bar, linear decay to ~0 across it
   const st = phrase(Math.floor(bar / BARS_PER_PHRASE));
   if (!st.drop) return st.ramp;
   const into = (st.dropLen - 1) * BARS_PER_PHRASE + (bar % BARS_PER_PHRASE);
   return 1 - into / (st.dropTarget * BARS_PER_PHRASE);
 };
-const FB_SWELL_SIG = sig(t => fbSwellAt(stepBar(t)[1])).segment(1);
+const DROP_SWELL_SIG = sig(t => dropSwellAt(stepBar(t)[1])).segment(1);
 
 const FX_ON = MODE === 'psy' ? 1 : 0;
+const DUB_FX_ON = MODE === 'dubtechno' ? 1 : 0;
 
 const MIDI_CHAN_FX = 1;
 const REPLIKA = {
@@ -912,23 +913,51 @@ const RAUM = {
 const SEND = { lead: 85, perc: 86, space: 87 };
 
 const sendFx = (ccNum, sigPattern, res = 8) =>
-  ccv(sigPattern.segment(res)).ccn(ccNum).midichan(MIDI_CHAN_FX).midi(midi);
+  ccv(sigPattern.fmap(x => Math.max(0, Math.min(1, x))).segment(res)).ccn(ccNum).midichan(MIDI_CHAN_FX).midi(midi);   // v95 - clamp: psy loCut dips below 0 at the drop peak
 const parkFx = (table, val = 0) =>
   stack(...Object.values(table).map(ccNum => ccv(val).ccn(ccNum))).midichan(MIDI_CHAN_FX).midi(midi);
 
+const breath = sine.slow(48).mul(0.72).add(perlin.slow(17).mul(0.28));
+const drift = perlin.slow(29);
+const inv = s => s.mul(-1).add(1);
+const gatePat = "<0.85 0.30 0.75 0.05 0.90 0.45 0.60>";
+const gateDepth = perlin.slow(37).range(0.55, 1.0);
+const dubBreakdownNudge = DROP_ACTIVE_SIG.mul(0.06);
+
 const fbDrift = perlin.slow(23).range(0.85, 1.10);
-const feedbackSig = FB_SWELL_SIG.mul(0.57).add(0.28).mul(fbDrift).mul(FX_ON);
+const feedbackSigPsy = DROP_SWELL_SIG.mul(0.57).add(0.28).mul(fbDrift);
+const feedbackSigDub = breath.range(0.58, 0.86).add(dubBreakdownNudge);
+const feedbackSig = feedbackSigPsy.mul(FX_ON).add(feedbackSigDub.mul(DUB_FX_ON));
 $: sendFx(REPLIKA.feedback, feedbackSig, 8);
 
 const fltDrift = perlin.slow(31).range(0.95, 1.05);
-const hiCutSig = sine.slow(8).range(0.35, 0.60).add(DROP_RAMP_SIG.mul(0.32)).mul(fltDrift).mul(FX_ON);
-const loCutSig = sine.slow(4).range(0.15, 0.30).add(DROP_RAMP_SIG.mul(-0.18)).mul(fltDrift).mul(FX_ON);
+const hiCutSigPsy = sine.slow(8).range(0.35, 0.60).add(DROP_SWELL_SIG.mul(0.32)).mul(fltDrift);
+const loCutSigPsy = sine.slow(4).range(0.15, 0.30).add(DROP_SWELL_SIG.mul(-0.18)).mul(fltDrift);
+const hiCutSigDub = inv(breath).range(0.30, 0.78);
+const loCutSigDub = breath.range(0.12, 0.42);
+const hiCutSig = hiCutSigPsy.mul(FX_ON).add(hiCutSigDub.mul(DUB_FX_ON));
+const loCutSig = loCutSigPsy.mul(FX_ON).add(loCutSigDub.mul(DUB_FX_ON));
 $: sendFx(REPLIKA.hiCut, hiCutSig, 16);
 $: sendFx(REPLIKA.loCut, loCutSig, 16);
 
+const satSig = breath.mul(0.6).add(drift.mul(0.4)).range(0.18, 0.52).mul(DUB_FX_ON);
+const fltResoSig = perlin.slow(37).range(0.08, 0.30).mul(DUB_FX_ON);
+const fltDepthSig = perlin.slow(23).range(0.10, 0.38).mul(DUB_FX_ON);
+const fltRateSig = sine.slow(61).range(0.15, 0.35).mul(DUB_FX_ON);
+const modDepthSig = perlin.slow(19).range(0.14, 0.36).mul(DUB_FX_ON);
+const psMixSig = perlin.slow(53).range(0.00, 0.22).mul(DUB_FX_ON);
+$: sendFx(REPLIKA.sat, satSig, 8);
+$: sendFx(REPLIKA.fltReso, fltResoSig, 8);
+$: sendFx(REPLIKA.fltDepth, fltDepthSig, 8);
+$: sendFx(REPLIKA.fltRate, fltRateSig, 8);
+$: sendFx(REPLIKA.modDepth, modDepthSig, 8);
+$: sendFx(REPLIKA.psMix, psMixSig, 8);
+
 const leadPulse = "0.8 0 0 0 0 0 0.8 0 0 0 0 0 0.8 0 0 0";
 const leadDrift = perlin.slow(37).range(0.9, 1.05);
-$: sendFx(SEND.lead, leadPulse.mul(leadDrift).mul(FX_ON), 16);
+const leadSigPsy = leadPulse.mul(leadDrift);
+const leadSigDub = gatePat.mul(gateDepth);
+$: sendFx(SEND.lead, leadSigPsy.mul(FX_ON).add(leadSigDub.mul(DUB_FX_ON)), 16);
 
 const spaceDrift = perlin.slow(41).range(0.9, 1.0);
 const spaceSig = DROP_RAMP_SIG.mul(0.45)
